@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <IsPackable>true</IsPackable>
+    <PackageId>FS.GG.Audio.Elmish</PackageId>
+    <Version>$(FsGgAudioVersion)</Version>
+    <Authors>FS-GG</Authors>
+    <Description>Elmish Cmd authoring surface over FS.GG.Audio.Host — Audio.Cmd.playSfx/playMusic/stopMusic/setMasterVolume produce Elmish commands that play through an IAudioBackend. Depends on Elmish (MIT), never on FS.GG.UI.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Elmish.fsi" />
+    <Compile Include="Elmish.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FS.GG.Audio.Core\FS.GG.Audio.Core.fsproj" />
+    <ProjectReference Include="..\FS.GG.Audio.Host\FS.GG.Audio.Host.fsproj" />
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="Elmish" />
+  </ItemGroup>
+
+</Project>
