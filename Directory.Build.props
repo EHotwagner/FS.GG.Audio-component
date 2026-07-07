@@ -7,4 +7,21 @@
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true' And Exists('$(MSBuildProjectDirectory)/packages.lock.json')">true</RestoreLockedMode>
   </PropertyGroup>
+
+  <!-- Package metadata for the publishable FS.GG.Audio.* set (org house style; mirrors the
+       sibling FS-GG repos). Only IsPackable=true projects carry it into a .nupkg. -->
+  <PropertyGroup Label="Package">
+    <Authors>FS.GG Contributors</Authors>
+    <Company>FS.GG Contributors</Company>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/FS-GG/FS.GG.Audio</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/FS-GG/FS.GG.Audio.git</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+    <PackageTags>fs-gg;audio;fsharp;game-audio</PackageTags>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageReadmeFile Condition="Exists('$(MSBuildProjectDirectory)/README.md')">README.md</PackageReadmeFile>
+  </PropertyGroup>
 </Project>

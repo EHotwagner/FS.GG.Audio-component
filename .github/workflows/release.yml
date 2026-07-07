@@ -1,0 +1,182 @@
+name: release
+
+# Release-only publish for FS.GG.Audio. Tag-triggered; NEVER a required check and NEVER on push/PR
+# (mirrors the sibling FS-GG repos' release cadence). Publishes the coherent set
+# FS.GG.Audio.Core + .Host + .Elmish + .Engine to the org GitHub Packages feed
+# (nuget.pkg.github.com/FS-GG), then dual-publishes the BYTE-IDENTICAL set to public nuget.org via
+# Trusted Publishing / OIDC (ADR-0012/0013 — no stored key). It ALSO attaches the "schema/apps"
+# artifacts to the GitHub Release: the committed .fsi API surface, the SDD lifecycle artifacts, and
+# the built sample app. Everything is gated on a green headless build+test first (publish-before-flip).
+#
+# All four packages share ONE version — <FsGgAudioVersion> in Directory.Packages.props (the
+# version-of-truth) — and move as a coherent set. Engine/Elmish/Host ProjectReferences to Core are
+# emitted as package dependencies at the same version.
+#
+# NOTE (manual, one-time): the nuget.org push needs an org Trusted Publishing policy registered for
+# this repo (Repository FS.GG.Audio, Workflow release.yml) plus a NUGET_USER secret; until then that
+# step 401s and fails the release loud. The org-feed push works with the built-in GITHUB_TOKEN.
+
+on:
+  release:
+    types: [published]
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to pack+publish (e.g. 0.1.0-preview.1). Required to actually push on a manual run; omit for a pack-only dry run."
+        type: string
+        required: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (locked restore + headless build + test)
+    runs-on: ubuntu-latest
+    if: github.repository == 'FS-GG/FS.GG.Audio'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore (locked)
+        run: |
+          set -euo pipefail
+          if ! dotnet restore FS.GG.Audio.slnx --locked-mode; then
+            echo "::error::locked restore failed — resolved graph != committed packages.lock.json. If intentional: dotnet restore FS.GG.Audio.slnx --force-evaluate  and commit the lockfiles."
+            exit 1
+          fi
+      - name: Build (Debug, --no-restore)
+        run: dotnet build FS.GG.Audio.slnx -c Debug --no-restore
+      - name: Test (full headless suite, --no-restore)
+        run: dotnet test FS.GG.Audio.slnx -c Debug --no-restore
+
+  publish:
+    name: Publish packages (org feed + nuget.org) + schema/apps assets
+    runs-on: ubuntu-latest
+    if: github.repository == 'FS-GG/FS.GG.Audio'
+    needs: [verify]
+    permissions:
+      contents: write     # create/upload GitHub Release assets
+      packages: write      # push to the org GitHub Packages feed
+      id-token: write      # ADR-0013: mint the GitHub OIDC token for nuget.org Trusted Publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Resolve version from the release tag
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            release)           raw="${{ github.event.release.tag_name }}" ;;
+            push)              raw="${GITHUB_REF_NAME}" ;;
+            workflow_dispatch) raw="${{ inputs.version }}" ;;
+            *)                 raw="" ;;
+          esac
+          ver="${raw#v}"   # v0.1.0-preview.1 -> 0.1.0-preview.1
+          if [[ -z "$ver" ]]; then
+            echo "::notice::No version (manual run without input) — pack-only dry run, no push."
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            ver="0.0.0-dryrun.${GITHUB_RUN_ID}"
+          else
+            echo "push=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "tag=${raw}" >> "$GITHUB_OUTPUT"
+          echo "Release version: $ver"
+
+      # The tag is the trigger; <FsGgAudioVersion> in Directory.Packages.props is the version the
+      # packages actually carry. They MUST agree, else the tag advertises bytes it doesn't match.
+      - name: Guard — tag version == repo version-of-truth
+        if: steps.ver.outputs.push == 'true'
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          truth="$(grep -oP '(?<=<FsGgAudioVersion>)[^<]+' Directory.Packages.props)"
+          [[ -n "$truth" ]] || { echo "::error::<FsGgAudioVersion> not found in Directory.Packages.props"; exit 1; }
+          if [[ "$truth" != "$VER" ]]; then
+            echo "::error::tag version ($VER) != Directory.Packages.props <FsGgAudioVersion> ($truth). Bump the version-of-truth to match the tag in the release PR."
+            exit 1
+          fi
+          echo "Version-of-truth matches the tag: $VER"
+
+      - name: Pack the coherent set (@ $VER)
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          dotnet restore FS.GG.Audio.slnx
+          dotnet pack FS.GG.Audio.slnx -c Release -p:Version="$VER" -o artifacts/packages
+          echo "Packed:"; ls -1 artifacts/packages/*.nupkg
+
+      - name: Push coherent set to nuget.pkg.github.com/FS-GG
+        if: steps.ver.outputs.push == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet nuget push "artifacts/packages/*.nupkg" \
+            --source https://nuget.pkg.github.com/FS-GG/index.json \
+            --api-key "${{ secrets.GITHUB_TOKEN }}" \
+            --skip-duplicate
+          echo "Published FS.GG.Audio.* ${{ steps.ver.outputs.version }} to the org feed."
+
+      - name: NuGet login (OIDC → short-lived nuget.org key)
+        if: steps.ver.outputs.push == 'true'
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+      - name: Push coherent set to nuget.org (public)
+        if: steps.ver.outputs.push == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet nuget push "artifacts/packages/*.nupkg" \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key "${{ steps.nuget-login.outputs.NUGET_API_KEY }}" \
+            --skip-duplicate
+          echo "Published FS.GG.Audio.* ${{ steps.ver.outputs.version }} to nuget.org."
+
+      # ── schema / apps release assets ────────────────────────────────────────────────────────
+      - name: Bundle schema (.fsi API surface) + SDD artifacts + sample app
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/assets
+          # schema: the committed public .fsi surface for every package.
+          ( cd docs/api-surface && zip -qr - . ) > "artifacts/assets/fs-gg-audio-api-surface-$VER.zip"
+          # SDD schema/apps artifacts: the authored lifecycle artifacts (charter..evidence, contracts).
+          zip -qr "artifacts/assets/fs-gg-audio-sdd-artifacts-$VER.zip" work -x '*/obj/*' '*/bin/*'
+          # sample app: a framework-dependent build of the headless demo.
+          dotnet publish samples/FS.GG.Audio.Sample/FS.GG.Audio.Sample.fsproj -c Release -o artifacts/sample --no-restore
+          ( cd artifacts/sample && zip -qr - . ) > "artifacts/assets/fs-gg-audio-sample-$VER.zip"
+          echo "Assets:"; ls -1 artifacts/assets
+
+      - name: Attach packages + schema/apps assets to the GitHub Release
+        if: steps.ver.outputs.push == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "$TAG" --notes "FS.GG.Audio $TAG — packages on the org feed + nuget.org; schema (.fsi), SDD artifacts, and the sample app attached below."
+          gh release upload "$TAG" artifacts/assets/*.zip artifacts/packages/*.nupkg --clobber
+          echo "Attached schema/apps assets and packages to release $TAG."

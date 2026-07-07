@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FS.GG.Audio.Engine\FS.GG.Audio.Engine.fsproj" />
+    <ProjectReference Include="..\..\src\FS.GG.Audio.Host\FS.GG.Audio.Host.fsproj" />
+    <ProjectReference Include="..\..\src\FS.GG.Audio.Core\FS.GG.Audio.Core.fsproj" />
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
+
+</Project>

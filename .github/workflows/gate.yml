@@ -1,0 +1,39 @@
+name: gate
+
+# Required check for FS.GG.Audio: deterministic locked-restore build + full headless test suite on
+# every push/PR to main. Never publishes (that is release.yml, tag-triggered only).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build + test (locked restore, net10.0, headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore (locked)
+        run: |
+          set -euo pipefail
+          if ! dotnet restore FS.GG.Audio.slnx --locked-mode; then
+            echo "::error::locked restore failed — the resolved graph does not match the committed packages.lock.json. If intentional, run: dotnet restore FS.GG.Audio.slnx --force-evaluate  and commit the lockfiles."
+            exit 1
+          fi
+      - name: Build (Debug, --no-restore)
+        run: dotnet build FS.GG.Audio.slnx -c Debug --no-restore
+      - name: Test (full headless suite, --no-restore)
+        run: dotnet test FS.GG.Audio.slnx -c Debug --no-restore
