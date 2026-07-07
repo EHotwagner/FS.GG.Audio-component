@@ -13,6 +13,14 @@ type IAudioBackend =
     inherit IDisposable
     abstract member Play: effect: AudioEffect -> unit
 
+// Optional mixing/spatial control (004-audio-engine). Additive: existing IAudioBackend-only
+// backends stay valid; FS.GG.Audio.Engine feature-detects this and degrades when it is absent.
+type IMixingBackend =
+    inherit IAudioBackend
+    abstract member SetBusGain: bus: Bus * gain: float -> unit
+    abstract member SetListener: x: float * y: float * z: float -> unit
+    abstract member PlayAt: sound: SoundId * gain: float * pan: float -> unit
+
 // Reach Core's Audio module without shadowing the host's own `Audio` module below.
 module CoreAudio = FS.GG.Audio.Core.Audio
 
@@ -144,13 +152,19 @@ module private OpenAl =
             member _.Play(effect: AudioEffect) =
                 try
                     match effect with
-                    | PlaySfx(sound, volume) ->
+                    // PlaySfx3D on the raw backend degrades to a non-positional one-shot at the
+                    // carried gain (004); the Engine spatializes via IMixingBackend.PlayAt.
+                    | PlaySfx(sound, volume)
+                    | PlaySfx3D(sound, _, _, _, volume) ->
                         match resolver.ResolveSound sound with
                         | Some bytes ->
                             match loadBuffer bytes with
                             | Some buf -> startSource buf false (float32 volume) |> ignore
                             | None -> ()
                         | None -> ()
+                    // Bus mixing / ducking are realized by FS.GG.Audio.Engine, not the raw backend.
+                    | SetBusVolume _
+                    | Duck _ -> ()
                     | PlayMusic(track, loop) ->
                         match resolver.ResolveTrack track with
                         | Some bytes ->

@@ -11,14 +11,29 @@ type SoundId = SoundId of string
 type TrackId = TrackId of string
 
 /// Public contract type exposed by this FS.GG.Audio.Core package.
+/// A named mixer bus (004-audio-engine). `Master` scales every other bus; `SetMasterVolume`
+/// targets `Master`. The engine (FS.GG.Audio.Engine) owns the mixing semantics; the vocabulary
+/// only names the buses a product can address.
+type Bus =
+    | Master
+    | Music
+    | Sfx
+    | Ui
+    | Ambient
+
+/// Public contract type exposed by this FS.GG.Audio.Core package.
 /// A requested sound action, expressed as a pure value from a product's `update`. Data only —
 /// no case carries a device handle, stream, or effectful closure. Volume/level are normalized
 /// gains in `[0.0, 1.0]`; out-of-range values are clamped at the boundary, never thrown on.
+/// The last three cases are additive (004-audio-engine); the original four are unchanged.
 type AudioEffect =
     | PlaySfx of sound: SoundId * volume: float
     | PlayMusic of track: TrackId * loop: bool
     | StopMusic
     | SetMasterVolume of level: float
+    | PlaySfx3D of sound: SoundId * x: float * y: float * z: float * volume: float
+    | SetBusVolume of bus: Bus * level: float
+    | Duck of bus: Bus * amount: float * milliseconds: float
 
 /// Public contract type exposed by this FS.GG.Audio.Core package.
 /// Ordered evidence of what a product requested, produced by the record-only interpreter. This
@@ -64,6 +79,20 @@ module Audio =
     /// Public contract function exposed by this FS.GG.Audio.Core package.
     /// Smart constructor for a master-volume request; clamps the carried level at the boundary.
     val setMasterVolume: level: float -> AudioEffect
+
+    /// Public contract function exposed by this FS.GG.Audio.Core package (004-audio-engine).
+    /// Smart constructor for a positional sound-effect request; clamps the carried volume. `z = 0`
+    /// is the 2D stereo-pan-by-x convenience.
+    val playSfx3D: sound: SoundId -> x: float -> y: float -> z: float -> volume: float -> AudioEffect
+
+    /// Public contract function exposed by this FS.GG.Audio.Core package (004-audio-engine).
+    /// Smart constructor for a per-bus volume request; clamps the carried level at the boundary.
+    val setBusVolume: bus: Bus -> level: float -> AudioEffect
+
+    /// Public contract function exposed by this FS.GG.Audio.Core package (004-audio-engine).
+    /// Smart constructor for a timed duck request; clamps `amount` to `[0, 1]` and `milliseconds`
+    /// to a non-negative floor.
+    val duck: bus: Bus -> amount: float -> milliseconds: float -> AudioEffect
 
     /// Public contract value exposed by this FS.GG.Audio.Core package.
     /// Evidence with no requests recorded yet.

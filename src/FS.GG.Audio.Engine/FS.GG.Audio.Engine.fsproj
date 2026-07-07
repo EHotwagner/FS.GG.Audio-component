@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <IsPackable>true</IsPackable>
+    <PackageId>FS.GG.Audio.Engine</PackageId>
+    <Version>$(FsGgAudioVersion)</Version>
+    <Authors>FS-GG</Authors>
+    <Description>Mixing/voice layer over FS.GG.Audio.Host — named buses, linear/equal-power fades and cross-fades, side-chain ducking, and 3D listener/emitter positioning, realized through the IAudioBackend seam (IMixingBackend when available) with a deterministic device-free record path. Depends on FS.GG.Audio.Host/.Core only; never on FS.GG.UI.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Engine.fsi" />
+    <Compile Include="Engine.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FS.GG.Audio.Core\FS.GG.Audio.Core.fsproj" />
+    <ProjectReference Include="..\FS.GG.Audio.Host\FS.GG.Audio.Host.fsproj" />
+    <PackageReference Include="FSharp.Core" />
+  </ItemGroup>
+
+</Project>

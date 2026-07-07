@@ -10,11 +10,21 @@ type SoundId = SoundId of string
 
 type TrackId = TrackId of string
 
+type Bus =
+    | Master
+    | Music
+    | Sfx
+    | Ui
+    | Ambient
+
 type AudioEffect =
     | PlaySfx of sound: SoundId * volume: float
     | PlayMusic of track: TrackId * loop: bool
     | StopMusic
     | SetMasterVolume of level: float
+    | PlaySfx3D of sound: SoundId * x: float * y: float * z: float * volume: float
+    | SetBusVolume of bus: Bus * level: float
+    | Duck of bus: Bus * amount: float * milliseconds: float
 
 type AudioEvidence = { Requested: AudioEffect list }
 
@@ -39,12 +49,26 @@ module Audio =
 
     let setMasterVolume (level: float) : AudioEffect = SetMasterVolume(clampVolume level)
 
+    let playSfx3D (sound: SoundId) (x: float) (y: float) (z: float) (volume: float) : AudioEffect =
+        PlaySfx3D(sound, x, y, z, clampVolume volume)
+
+    let setBusVolume (bus: Bus) (level: float) : AudioEffect = SetBusVolume(bus, clampVolume level)
+
+    // Duck amount is a normalized attenuation in [0,1]; the attack duration is a non-negative
+    // millisecond floor (`nan`/negative -> 0.0, a defined instantaneous duck).
+    let duck (bus: Bus) (amount: float) (milliseconds: float) : AudioEffect =
+        let ms = if milliseconds > 0.0 then milliseconds else 0.0
+        Duck(bus, clampVolume amount, ms)
+
     // Normalize the volume carried by an effect so recorded evidence is always in range, regardless
     // of whether the caller went through a smart constructor.
     let private normalize (effect: AudioEffect) : AudioEffect =
         match effect with
         | PlaySfx(sound, volume) -> PlaySfx(sound, clampVolume volume)
         | SetMasterVolume level -> SetMasterVolume(clampVolume level)
+        | PlaySfx3D(sound, x, y, z, volume) -> PlaySfx3D(sound, x, y, z, clampVolume volume)
+        | SetBusVolume(bus, level) -> SetBusVolume(bus, clampVolume level)
+        | Duck(bus, amount, ms) -> Duck(bus, clampVolume amount, (if ms > 0.0 then ms else 0.0))
         | PlayMusic _
         | StopMusic -> effect
 

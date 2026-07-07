@@ -19,6 +19,20 @@ type IAudioBackend =
     /// backend that cannot act degrades to a no-op.
     abstract member Play: effect: AudioEffect -> unit
 
+/// Public contract type (004-audio-engine). Optional mixing/spatial control a backend MAY
+/// implement alongside `IAudioBackend`. `FS.GG.Audio.Engine` feature-detects it
+/// (`:? IMixingBackend`); a backend that does not implement it degrades to plain `Play`, with
+/// bus/fade/duck folded into one-shot gains and 3D collapsed to non-positional voices. Additive:
+/// existing backends that implement only `IAudioBackend` stay valid.
+type IMixingBackend =
+    inherit IAudioBackend
+    /// Set a bus's realized gain (already clamped to `[0,1]`), called as fades/ducks advance.
+    abstract member SetBusGain: bus: Bus * gain: float -> unit
+    /// Set the listener position in metres.
+    abstract member SetListener: x: float * y: float * z: float -> unit
+    /// Play a positional one-shot with a pre-resolved effective gain and pan in `[-1, 1]`.
+    abstract member PlayAt: sound: SoundId * gain: float * pan: float -> unit
+
 /// Public contract module. A pure, total minimal PCM WAV reader (no device, no OpenAL types).
 [<RequireQualifiedAccess>]
 module Wav =
