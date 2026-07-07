@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <IsPackable>true</IsPackable>
+    <PackageId>FS.GG.Audio.Host</PackageId>
+    <Version>$(FsGgAudioVersion)</Version>
+    <Authors>FS-GG</Authors>
+    <Description>Host-side playback for FS.GG.Audio.Core — a pluggable IAudioBackend with a deterministic Null/record backend and a real OpenAL (Silk.NET) device backend that degrades to Null when no device is present.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Host.fsi" />
+    <Compile Include="Host.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FS.GG.Audio.Core\FS.GG.Audio.Core.fsproj" />
+    <PackageReference Include="FSharp.Core" />
+    <PackageReference Include="Silk.NET.OpenAL" />
+    <PackageReference Include="Silk.NET.OpenAL.Soft.Native" />
+  </ItemGroup>
+
+</Project>

@@ -10,6 +10,10 @@
     <!-- FSharp.Core: the org common pin (Rendering/SDD/Governance all pin 10.1.301). FS.GG.Audio.Core
          depends on FSharp.Core ALONE (FR-006). -->
     <PackageVersion Include="FSharp.Core" Version="10.1.301" />
+    <!-- FS.GG.Audio.Host: real OpenAL backend. MIT managed bindings; the OpenAL Soft native
+         (LGPL) ships via the .Soft.Native runtime package, dynamically linked + replaceable. -->
+    <PackageVersion Include="Silk.NET.OpenAL" Version="2.23.0" />
+    <PackageVersion Include="Silk.NET.OpenAL.Soft.Native" Version="1.23.1" />
     <!-- Test-only. FsCheck 3.x to match the ported suite's API (Config.QuickThrowOnFailure.WithMaxTest
          / Check.One) — the same line the donor Canvas.Tests used. -->
     <PackageVersion Include="Expecto" Version="10.2.3" />
