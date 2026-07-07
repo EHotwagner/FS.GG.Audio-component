@@ -55,7 +55,7 @@ evidence:
     owner: null
     scope: null
     laterLifecycleVisibility: null
-    notes: ["ofEffects test: running the command's effects plays each AudioEffect through the backend in dispatch order. 3/3 headless."]
+    notes: ["ofEffects test: running the command's effects plays each AudioEffect through the backend in dispatch order. 6/6 headless."]
   - id: EV002
     kind: verification
     subject:
@@ -143,7 +143,7 @@ evidence:
     owner: null
     scope: null
     laterLifecycleVisibility: null
-    notes: ["Suite runs headless (3/3): commands executed against a recording backend with a no-op dispatch; no audio device."]
+    notes: ["Suite runs headless (6/6): commands executed against a recording backend with a no-op dispatch; no audio device."]
   - id: EV006
     kind: review
     subject:
@@ -341,7 +341,7 @@ evidence:
     owner: null
     scope: null
     laterLifecycleVisibility: null
-    notes: ["VO-001 met: focused Elmish suite executed green (3/3)."]
+    notes: ["VO-001 met: focused Elmish suite executed green (6/6)."]
   - id: EV015
     kind: note
     subject:
