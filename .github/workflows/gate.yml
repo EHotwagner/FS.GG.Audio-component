@@ -46,7 +46,14 @@ jobs:
           set -euo pipefail
           dotnet pack FS.GG.Audio.slnx -c Release --no-restore -o ./artifacts
           for id in FS.GG.Audio.Core FS.GG.Audio.Host FS.GG.Audio.Engine FS.GG.Audio.Elmish; do
-            pkg="./artifacts/${id}.$(grep -oPm1 '(?<=<FsGgAudioVersion>)[^<]+' Directory.Packages.props).nupkg"
+            # Glob rather than rebuild the filename from <FsGgAudioVersion>: NuGet normalizes the
+            # version it stamps into the name (0.1.0+ci -> 0.1.0), so a reconstructed path would
+            # miss and report a missing readme for a package that is in fact fine.
+            pkg=$(echo ./artifacts/${id}.*.nupkg)
+            if [ ! -f "$pkg" ]; then
+              echo "::error::${id}: no .nupkg produced at ${pkg} — cannot verify its readme."
+              exit 1
+            fi
             if ! unzip -p "$pkg" "${id}.nuspec" | grep -q '<readme>README.md</readme>'; then
               echo "::error::${id}: nuspec carries no <readme>. nuget.org warns 'Readme missing' and renders no body (#8)."
               exit 1
