@@ -157,6 +157,15 @@
         "dependencies": {
           "Elmish": "[5.0.2, )",
           "FS.GG.Audio.Core": "[0.1.0, )",
+          "FS.GG.Audio.Engine": "[0.1.0, )",
+          "FS.GG.Audio.Host": "[0.1.0, )",
+          "FSharp.Core": "[10.1.301, )"
+        }
+      },
+      "fs.gg.audio.engine": {
+        "type": "Project",
+        "dependencies": {
+          "FS.GG.Audio.Core": "[0.1.0, )",
           "FS.GG.Audio.Host": "[0.1.0, )",
           "FSharp.Core": "[10.1.301, )"
         }
