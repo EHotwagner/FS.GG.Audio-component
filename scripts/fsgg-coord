@@ -149,6 +149,20 @@
 
 set -euo pipefail
 
+# `die` must be FATAL from anywhere — including inside a `$( )`. `exit` in a command substitution
+# only unwinds that subshell, and `set -e` does NOT propagate the substitution's non-zero status
+# across a bare `out="$(...)"` assignment (verified on bash 5.x). So a `die` two subshells deep used
+# to leave the caller with an empty string and rc 0, and an UNREADABLE board would render as a
+# confident, empty one (#344). `die` therefore signals the top-level shell, whose trap turns any
+# die — at any nesting depth — into a real `exit 1`.
+#
+# The exception: a FEW callers deliberately run a command in a subshell so its `die` stays LOCAL —
+# a best-effort board write whose failure must NOT unwind a claim the lock already holds, and the
+# soft read `item_status` feeds release/reap. They set `SOFT_DIE=1` in that subshell's environment;
+# `die` then skips the signal and just exits the subshell, so the caller's `if (…)` / `|| return`
+# catches it exactly as before. Unmarked dies stay fatal, which is the whole point.
+trap 'exit 1' TERM
+
 OWNER="${FSGG_COORD_OWNER:-FS-GG}"
 TITLE="${FSGG_COORD_PROJECT:-Coordination}"
 # The ONLY Status a claim writes. Undoing a claim (`release`, `reap`) resets this column and no
@@ -164,7 +178,7 @@ CLAIM_LEASE_MIN="${FSGG_CLAIM_LEASE_MIN:-120}"
 CLAIM_MARK='fsgg:claim'
 MSG_MARK='fsgg:msg'
 
-die() { echo "fsgg-coord: $*" >&2; exit 1; }
+die() { echo "fsgg-coord: $*" >&2; [ -n "${SOFT_DIE:-}" ] || kill -s TERM $$ 2>/dev/null; exit 1; }
 dbg() { [ -n "${FSGG_COORD_DEBUG:-}" ] && echo "fsgg-coord: $*" >&2 || true; }
 
 command -v gh >/dev/null 2>&1 || die "gh not found (GitHub CLI is required)."
@@ -656,11 +670,12 @@ item_status() {
       } } } }
     rateLimit{ cost remaining }
   }'
-  # Check the read EXPLICITLY. `gql` dies, but its `exit` only unwinds the `$( )` it runs in, leaving
-  # `out` empty here — and an empty payload yields no board node, which is indistinguishable from
-  # "not on this board" (rc 2) unless we catch it first. That mistake is the whole bug in miniature:
-  # a failed read must never be reported as a known, benign state.
-  out="$(gql "$q" -f owner="$R_OWNER" -f repo="$R_REPO" -F num="$R_NUM")" || return 1
+  # Check the read EXPLICITLY, and mark it SOFT. This caller is the deliberate exception to #344's
+  # fail-closed rule: `release`/`reap` must still drop a lease when the board is unreadable, so here a
+  # failed read is rc 1 (handled), not a fatal abort. `SOFT_DIE=1` keeps `gql`'s `die` from escalating
+  # to the whole command, so `|| return 1` catches it. An empty payload yields no board node,
+  # indistinguishable from "not on this board" (rc 2) unless we catch it first — so we catch it.
+  out="$(SOFT_DIE=1 gql "$q" -f owner="$R_OWNER" -f repo="$R_REPO" -F num="$R_NUM")" || return 1
   [ -n "$out" ] || return 1
   node="$(jq -c --argjson pn "$boardnum" \
     '[ .data.repository.issue.projectItems.nodes[]? | select(.project.number == $pn) ] | first // empty' \
@@ -1429,7 +1444,8 @@ done_cmd() {
     repository(owner:$owner, name:$repo){ issue(number:$num){
       number title url state
       closedByPullRequestsReferences(first:10, includeClosedPrs:true){
-        nodes{ number url merged mergedAt mergeCommit{ abbreviatedOid } }
+        nodes{ number url merged mergedAt mergeCommit{ abbreviatedOid }
+          closingIssuesReferences(first:10){ nodes{ number repository{ nameWithOwner } } } }
       }
       projectItems(first:20){ nodes{
         project{ number title }
@@ -1452,11 +1468,28 @@ done_cmd() {
   status="$(jq -r --argjson pn "$boardnum" \
     '[.data.repository.issue.projectItems.nodes[]? | select(.project.number==$pn) | .status.name] | first // ""' <<<"$out")"
 
-  # the closing PR: an explicit --pr, else the first MERGED PR that closes the issue
-  local prfilter="select(.merged==true)"
-  [ -n "$pr" ] && prfilter="select(.number==$pr)"
-  local prsel; prsel="$(jq -c \
-    "[.data.repository.issue.closedByPullRequestsReferences.nodes[]? | $prfilter] | first // null" <<<"$out")"
+  # The closing PR. `closedByPullRequestsReferences` also lists PRs that merely MENTION the issue in
+  # prose (our "Filed, not fixed: #N" convention is exactly this), and GitHub returns them
+  # lowest-number-first — so taking the first merged one stamped the wrong commit, or stamped green
+  # off an unrelated merge that never touched the work (.github#342). Provenance, not just outcome:
+  #   - keep only PRs whose `closingIssuesReferences` actually contains THIS issue (`Closes #N`, the
+  #     field that distinguishes a closer from a mention), in this repo;
+  #   - among those, take the one merged LAST, not the lowest-numbered;
+  #   - if none survive, fall through to the existing "no merged PR closes this issue" refusal below
+  #     (merged="" -> false) — never fall back to a mention.
+  # An explicit --pr is a human override: honour it by number and let the merged-check below judge it.
+  local prsel
+  if [ -n "$pr" ]; then
+    prsel="$(jq -c --argjson prn "$pr" \
+      '[.data.repository.issue.closedByPullRequestsReferences.nodes[]? | select(.number==$prn)] | first // null' <<<"$out")"
+  else
+    prsel="$(jq -c --argjson num "$R_NUM" --arg repo "$R_OWNER/$R_REPO" '
+      [ .data.repository.issue.closedByPullRequestsReferences.nodes[]?
+        | select(.merged==true)
+        | select([.closingIssuesReferences.nodes[]?
+                    | select(.number==$num and .repository.nameWithOwner==$repo)] | length > 0) ]
+      | sort_by(.mergedAt) | last // null' <<<"$out")"
+  fi
   local merged prnum prsha prday
   merged="$(jq -r '.merged // false' <<<"$prsel")"
   prnum="$(jq -r '.number // ""' <<<"$prsel")"
@@ -1650,8 +1683,9 @@ claim_cmd() {
   stamp_worktree "$w" "$R_REPO#$R_NUM"
   # A SUBSHELL, not just a redirect: set_field's `die` is an `exit`, and the board flip is strictly
   # best-effort — the lock is already held, so a board that rejects the write must not unwind a claim.
+  # SOFT_DIE=1 keeps that `die` from escalating to the whole command under #344's fatal-die rule.
   local boardnote
-  if ( set_field "$ref" Status "$CLAIM_STATUS" ) >/dev/null 2>&1; then
+  if ( SOFT_DIE=1; set_field "$ref" Status "$CLAIM_STATUS" ) >/dev/null 2>&1; then
     boardnote="board: $CLAIM_STATUS"
   else
     boardnote="note: not on board '$TITLE' (the marker is the lock; add it to sequence it)"
@@ -1769,7 +1803,9 @@ release_cmd() {
   fi
 
   if [ -z "$boardnote" ]; then
-    if ( set_field "$ref" Status "$status" ) >/dev/null 2>&1; then boardnote="board: $status"
+    # SOFT_DIE=1: the board write is best-effort (the lease is already dropped); its `die` must not
+    # escalate to the whole command under #344's fatal-die rule.
+    if ( SOFT_DIE=1; set_field "$ref" Status "$status" ) >/dev/null 2>&1; then boardnote="board: $status"
     else boardnote="note: not on board '$TITLE'"; fi
   fi
   printf 'released %s (worker %s)  ·  %s\n' "$R_REPO#$R_NUM" "$w" "$boardnote"
@@ -2306,7 +2342,7 @@ reap_cmd() {
     local rnote ract rval
     IFS=$'\t' read -r ract rval < <(unclaim_status "$r#$num")
     case "$ract" in
-      write) if ( set_field "$r#$num" Status "$rval" ) >/dev/null 2>&1; then rnote="board: $rval"
+      write) if ( SOFT_DIE=1; set_field "$r#$num" Status "$rval" ) >/dev/null 2>&1; then rnote="board: $rval"
              else rnote="not on board (marker cleared; nothing to reset)"; fi ;;
       keep)  rnote="board: $rval (preserved)" ;;
       offboard)   rnote="not on board (marker cleared; nothing to reset)" ;;
@@ -2327,6 +2363,23 @@ reap_cmd() {
 #
 # Items with no declared `Paths:` are NOT scheduled and are reported — an undeclared touch-set is
 # unschedulable by construction, and silently dropping it would look like "there is no work".
+#
+# Unlike `widen` and `overlap --active`, `batch` is legitimately MULTI-REPO: with no `--repo` it
+# schedules across the whole board, so its reservation set mixes touch-sets from different repos. But
+# `Paths:` tokens are repo-relative — `scripts/foo` in one repo and `scripts/foo` in another name two
+# different files in two different worktrees — and `conflicts_between` cannot see a repo, so comparing
+# them bare invents a phantom collision and under-schedules a candidate that nothing is actually
+# holding (#312). #353 fixed the single-item comparers by SCOPING their input to one repo; `batch`
+# cannot do that (spanning repos is the point), so instead it TAGS every reserved token with its
+# owning repo (`owner/repo<TAB>token`) and projects out just the same-repo tokens before each
+# comparison — honouring `conflicts_between`'s same-repo contract without collapsing the batch to one
+# repo. `tag_repo` tags a token list; `reserved_in` reads one repo's tokens back out.
+tag_repo() {  # $1=token list (newline-separated)  $2=owner/repo -> `owner/repo<TAB>token` lines
+  printf '%s\n' "$1" | awk -v r="$2" 'NF { print r "\t" $0 }'
+}
+reserved_in() {  # $1=repo-tagged lines  $2=owner/repo -> the bare tokens reserved in THAT repo
+  printf '%s\n' "$1" | awk -F'\t' -v r="$2" 'NF >= 2 && $1 == r { print $2 }'
+}
 batch_cmd() {
   local repo="" want=0 json="" include_backlog=""
   while [ $# -gt 0 ]; do
@@ -2354,7 +2407,9 @@ batch_cmd() {
   # Touch-sets already spoken for by in-flight work. `active_claims` finds a claim by its MARKER, so
   # this reserves the touch-sets of items the board has lost track of (a failed `Status` flip, or an
   # item never added to the board) — which the column-seeded version silently left free to schedule.
-  local active_paths; active_paths="$(jq -r '.[].paths[]?' <<<"$active")"
+  # Each token carries its owning repo (`owner/repo<TAB>token`); every comparison below projects out
+  # just the candidate's own repo first, because a cross-repo token names a different file (#312).
+  local active_paths; active_paths="$(jq -r '.[] | .repo as $r | .paths[]? | "\($r)\t\(.)"' <<<"$active")"
 
   # A held item whose touch-set is unmatchable RESERVES NOTHING: every candidate would clear it, and
   # `batch` would hand a second worker the very files it is holding. We cannot see that item's real
@@ -2364,7 +2419,7 @@ batch_cmd() {
   active_bad="$(claims_with_unmatchable_paths "$active")"
   [ -z "$active_bad" ] || die "batch: in-flight claim(s) declare unmatchable touch-set token(s) and therefore reserve nothing: $active_bad — refusing to schedule against an unknown touch-set. Fix with: fsgg-coord widen <issue> --paths '<paths>'"
 
-  local -a chosen_ids=() chosen_paths=()
+  local -a chosen_ids=() chosen_paths=() chosen_repos=()
   local n i=0 skipped=""
   n="$(jq 'length' <<<"$cands")"
   while [ "$i" -lt "$n" ]; do
@@ -2382,7 +2437,7 @@ batch_cmd() {
       # Same rule as the `active` pre-check, for a claim that never reached the board: an unmatchable
       # touch-set reserves nothing, so its holder's files are invisible to every later comparison.
       [ -z "$(invalid_paths "$p")" ] || die "batch: $id is claimed by worker $holder but declares unmatchable touch-set token(s): $(fmt_bad_paths "$(invalid_paths "$p")") — it reserves nothing, so refusing to schedule against an unknown touch-set. Fix with: fsgg-coord widen $id --paths '<paths>'"
-      active_paths="$active_paths${active_paths:+$'\n'}$p"
+      active_paths="$active_paths${active_paths:+$'\n'}$(tag_repo "$p" "$r")"
       skipped="$skipped  $id — already claimed by worker $holder"$'\n'; continue
     fi
     if [ -z "$p" ]; then
@@ -2393,19 +2448,21 @@ batch_cmd() {
     if [ -n "$(invalid_paths "$p")" ]; then
       skipped="$skipped  $id — unmatchable 'Paths:' token(s): $(fmt_bad_paths "$(invalid_paths "$p")") (cannot schedule)"$'\n'; continue
     fi
-    hits="$(conflicts_between "$p" "$active_paths")"
+    hits="$(conflicts_between "$p" "$(reserved_in "$active_paths" "$r")")"
     if [ -n "$hits" ]; then
       skipped="$skipped  $id — overlaps in-flight work: $(printf '%s' "$hits" | head -1)"$'\n'; continue
     fi
     clash=""
     for ((j = 0; j < ${#chosen_paths[@]}; j++)); do
+      # Two chosen items in different repos share no file (different worktrees) — never compare them.
+      [ "${chosen_repos[j]}" = "$r" ] || continue
       hits="$(conflicts_between "$p" "${chosen_paths[j]}")"
       [ -n "$hits" ] && { clash="${chosen_ids[j]} ($(printf '%s' "$hits" | head -1))"; break; }
     done
     if [ -n "$clash" ]; then
       skipped="$skipped  $id — overlaps batch member $clash"$'\n'; continue
     fi
-    chosen_ids+=("$id"); chosen_paths+=("$p")
+    chosen_ids+=("$id"); chosen_paths+=("$p"); chosen_repos+=("$r")
     [ "$want" -gt 0 ] && [ "${#chosen_ids[@]}" -ge "$want" ] && break
   done
 
@@ -2450,8 +2507,10 @@ take_cmd() {
       echo "  see why:  fsgg-coord batch${repo:+ --repo $repo}" >&2
       return 0
     fi
-    # claim in a subshell: its `die` must end the attempt, not `take`.
-    if ( claim_cmd "$pick" ); then return 0; fi
+    # claim in a subshell: its `die` (a lost race) must end the attempt, not `take`. SOFT_DIE=1 keeps
+    # that `die` local under #344's fatal-die rule — the board read that must fail closed already
+    # happened in `batch_cmd` above, before we ever get a `$pick` to claim.
+    if ( SOFT_DIE=1; claim_cmd "$pick" ); then return 0; fi
     echo "fsgg-coord: worker $w lost $pick (attempt $attempt/$tries) — rescheduling." >&2
     attempt=$((attempt + 1))
   done
