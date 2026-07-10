@@ -4,11 +4,14 @@ open System.IO
 open Expecto
 open FS.GG.Audio.Core
 open FS.GG.Audio.Host
+open FS.GG.Audio.Engine
 open FS.GG.Audio.Elmish
 
 // Disambiguate the three `Audio` modules in scope (Core vocabulary, Host drive, this Cmd surface).
 module CoreAudio = FS.GG.Audio.Core.Audio
 module AudioCmd = FS.GG.Audio.Elmish.Audio.Cmd
+
+let private acc = Accuracy.high
 
 // Walk up from the test binary to the repo root (the directory holding the solution file).
 let private repoRoot () =
@@ -22,6 +25,19 @@ type private RecordingBackend() =
     member _.Calls = List.ofSeq calls
     interface IAudioBackend with
         member _.Play(e) = calls.Add e
+        member _.Dispose() = ()
+
+// A recording backend that implements the optional mixing seam, so an engine over it spatializes
+// and drives continuous bus gains — used to prove `ofEngine` carries 3D through the Cmd path.
+type private RecordingMixingBackend() =
+    let playAts = ResizeArray<SoundId * float * float>()
+    member _.PlayAts = List.ofSeq playAts
+    interface IMixingBackend with
+        member _.SetBusGain(_, _) = ()
+        member _.SetListener(_, _, _) = ()
+        member _.PlayAt(sound, gain, pan) = playAts.Add(sound, gain, pan)
+    interface IAudioBackend with
+        member _.Play(_) = ()
         member _.Dispose() = ()
 
 // Execute an Elmish command's effects with a recording dispatch; return the dispatched messages.
@@ -86,6 +102,59 @@ let tests =
             Expect.isTrue (refs |> Array.contains "Elmish") "references Elmish"
             Expect.isTrue (refs |> Array.contains "FS.GG.Audio.Host") "references FS.GG.Audio.Host"
             Expect.isTrue (refs |> Array.contains "FS.GG.Audio.Core") "references FS.GG.Audio.Core"
+            Expect.isTrue (refs |> Array.contains "FS.GG.Audio.Engine") "references FS.GG.Audio.Engine (005 FR-005)"
+        }
+
+        test "ofEngine routes the batch through Engine.step so mixing applies (005 FR-001, FR-002)" {
+            // A plain (non-mixing) recording backend: the engine degrades to Play, FOLDING the bus
+            // gain into the one-shot volume. So a Sfx bus at 0.5 turns request 1.0 into 0.5 — proof
+            // that the effects went through the Engine, not straight at the backend.
+            let backend = new RecordingBackend()
+            let engine = Engine.create (backend :> IAudioBackend)
+            let cmd: Elmish.Cmd<int> =
+                AudioCmd.ofEngine engine 0.0 [ CoreAudio.setBusVolume Sfx 0.5
+                                               CoreAudio.playSfx (SoundId "s") 1.0 ]
+            let dispatched = run cmd
+            Expect.floatClose acc (engine.BusGain Sfx) 0.5 "SetBusVolume consumed by the engine"
+            let v = List.exactlyOne engine.LastVoices
+            Expect.floatClose acc v.EffectiveGain 0.5 "effective gain = request x bus x master = 1.0 x 0.5 x 1.0"
+            Expect.equal
+                backend.Calls
+                [ PlaySfx(SoundId "s", 0.5) ]
+                "the engine realized one gain-folded Play; SetBusVolume did not reach the raw backend"
+            Expect.isEmpty dispatched "fire-and-forget: no message dispatched (005 FR-003)"
+        }
+
+        test "ofEffects vs ofEngine on the same batch: raw pass-through vs mixed (005 FR-002)" {
+            let batch = [ CoreAudio.setBusVolume Sfx 0.5; CoreAudio.playSfx (SoundId "s") 1.0 ]
+
+            // Raw path: every effect lands at the backend verbatim — SetBusVolume is a backend no-op
+            // Play and the sfx stays at its raw 1.0 request gain (this is exactly the #21 footgun).
+            let raw = new RecordingBackend()
+            run (AudioCmd.ofEffects (raw :> IAudioBackend) batch) |> ignore
+            Expect.equal
+                raw.Calls
+                [ SetBusVolume(Sfx, 0.5); PlaySfx(SoundId "s", 1.0) ]
+                "ofEffects plays both effects straight at the backend, unmixed"
+
+            // Engine path: SetBusVolume shapes the bus and the sfx comes out at the mixed 0.5 gain.
+            let mixed = new RecordingBackend()
+            let engine = Engine.create (mixed :> IAudioBackend)
+            run (AudioCmd.ofEngine engine 0.0 batch) |> ignore
+            Expect.equal mixed.Calls [ PlaySfx(SoundId "s", 0.5) ] "ofEngine mixes: bus gain folded in, SetBusVolume consumed"
+        }
+
+        test "ofEngine carries 3D positioning through the Cmd path on a mixing backend (005 FR-002)" {
+            let backend = new RecordingMixingBackend()
+            let engine = Engine.create (backend :> IAudioBackend)
+            Engine.setListener engine 0.0 0.0 0.0
+            run (AudioCmd.ofEngine engine 0.0 [ CoreAudio.playSfx3D (SoundId "s") 3.0 0.0 0.0 1.0 ]) |> ignore
+            let v = List.exactlyOne engine.LastVoices
+            Expect.isTrue v.Positional "the 3D voice stays positional — ofEffects would have degraded it"
+            Expect.floatClose acc v.EffectiveGain (1.0 / 3.0) "inverse-distance attenuation at d=3"
+            let _, gain, pan = List.exactlyOne backend.PlayAts
+            Expect.floatClose acc pan 1.0 "hard-right emitter pans to +1 through the mixing seam"
+            Expect.floatClose acc gain (1.0 / 3.0) "the mixing backend receives the attenuated gain"
         }
 
         test "commands run headless against a recording backend with a no-op dispatch, no device (FR-005)" {
