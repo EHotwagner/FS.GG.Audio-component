@@ -87,6 +87,56 @@ let tests =
             Expect.isTrue true "create degraded without throwing and play was safe"
         }
 
+        // The bundled OpenAL backend must be an IMixingBackend, because that is the only interface
+        // FS.GG.Audio.Engine spatializes through: a backend that implements IAudioBackend alone
+        // silently drops every pan. Vacuous on headless CI, where create degrades to Null (and Null
+        // must stay a plain IAudioBackend, so the Engine's degrade path is what runs there).
+        test "the OpenAL backend implements IMixingBackend when a device is present (#11)" {
+            let resolver =
+                { ResolveSound = (fun _ -> None)
+                  ResolveTrack = (fun _ -> None) }
+            let backend = OpenAlBackend.create resolver
+            match backend with
+            | :? NullBackend.T -> Expect.isFalse (backend :? IMixingBackend) "the Null fallback stays non-mixing"
+            | _ -> Expect.isTrue (backend :? IMixingBackend) "a real device backend spatializes"
+            backend.Dispose()
+        }
+
+        test "Spatial.panToPosition puts a centred voice in front of the listener (#11)" {
+            let (x, y, z) = Spatial.panToPosition 0.0
+            Expect.floatClose Accuracy.high x 0.0 "centred: no lateral offset"
+            Expect.floatClose Accuracy.high y 0.0 "planar: no vertical offset"
+            Expect.floatClose Accuracy.high z -1.0 "dead ahead, not inside the listener's head"
+        }
+
+        test "Spatial.panToPosition separates hard left from hard right (#11)" {
+            let (lx, _, lz) = Spatial.panToPosition -1.0
+            let (rx, _, rz) = Spatial.panToPosition 1.0
+            Expect.floatClose Accuracy.high lx -1.0 "pan=-1 sits on the listener's left"
+            Expect.floatClose Accuracy.high rx 1.0 "pan=+1 sits on the listener's right"
+            Expect.floatClose Accuracy.high lz 0.0 "hard pan is fully lateral"
+            Expect.floatClose Accuracy.high rz 0.0 "hard pan is fully lateral"
+            Expect.isLessThan lx rx "left and right are distinguishable, not collapsed"
+        }
+
+        test "Spatial.panToPosition is unit-length for every pan, so gain is never re-attenuated (#11)" {
+            // Engine already folded distance attenuation into the voice's gain. The source must land
+            // on the unit circle: at OpenAL's default reference distance the distance model is a
+            // no-op, so the gain we pass is the gain that plays.
+            for i in -20 .. 20 do
+                let pan = float i / 10.0 // spans [-2, 2]: past the ends too, to cover the clamp
+                let (x, y, z) = Spatial.panToPosition pan
+                Expect.floatClose Accuracy.high (sqrt (x * x + y * y + z * z)) 1.0 $"unit length at pan={pan}"
+        }
+
+        test "Spatial.panToPosition clamps out-of-range pan and centres nan (#11)" {
+            Expect.equal (Spatial.panToPosition -5.0) (Spatial.panToPosition -1.0) "below -1 clamps to hard left"
+            Expect.equal (Spatial.panToPosition 5.0) (Spatial.panToPosition 1.0) "above +1 clamps to hard right"
+            // Total on bad input (Principle VI): nan is a defined centre, not a nan position that
+            // would silently mute the source on the device.
+            Expect.equal (Spatial.panToPosition nan) (Spatial.panToPosition 0.0) "nan -> centred"
+        }
+
         test "Wav.tryParse reads a minimal PCM WAV (FR-005)" {
             match Wav.tryParse (sampleWav ()) with
             | Some pcm ->

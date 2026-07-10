@@ -72,6 +72,28 @@ module Wav =
         with _ -> None
 
 [<RequireQualifiedAccess>]
+module Spatial =
+
+    // FS.GG.Audio.Engine owns the spatial model: by the time a voice reaches IMixingBackend.PlayAt
+    // its distance attenuation is already folded into `gain`, and its direction survives only as a
+    // stereo pan in [-1, 1]. A device backend therefore has to place the source where the device's
+    // own distance model cannot attenuate it a second time: on the unit circle around the listener,
+    // in the listener's frame. Pan drives the lateral axis; the remainder goes to -z (straight
+    // ahead, the OpenAL listener's default facing), so a centred voice sits in front of the
+    // listener rather than inside their head.
+    let panToPosition (pan: float) : float * float * float =
+        let p =
+            if Double.IsNaN pan then 0.0
+            elif pan < -1.0 then -1.0
+            elif pan > 1.0 then 1.0
+            else pan
+        // p^2 <= 1 by the clamp above, so the sqrt is total and the result is always unit-length.
+        // At a hard pan the depth is `-sqrt 0.0` = negative zero; fold it to +0.0 so a printed or
+        // compared position reads as the plain 0.0 it is.
+        let z = -sqrt (1.0 - p * p)
+        (p, 0.0, (if z = 0.0 then 0.0 else z))
+
+[<RequireQualifiedAccess>]
 module Audio =
 
     let play (backend: IAudioBackend) (effects: AudioEffect list) : unit =
@@ -127,6 +149,34 @@ module private OpenAl =
         let sources = Collections.Generic.List<uint>()
         let mutable musicSource : uint option = None
 
+        // Realized bus gains, as pushed by IMixingBackend.SetBusGain. Engine folds Sfx*Master into
+        // each one-shot's gain before PlayAt, but it forwards PlayMusic to `Play` un-scaled — so the
+        // music voice is the one thing the backend must scale itself, and it is the only reader of
+        // this table. Master must NOT reach the listener gain here: that would apply it a second
+        // time to voices whose gain already carries it.
+        let busGains = Collections.Generic.Dictionary<Bus, float>()
+        do for b in [ Master; Music; Sfx; Ui; Ambient ] do busGains.[b] <- 1.0
+
+        let musicGain () = float32 (CoreAudio.clampVolume (busGains.[Music] * busGains.[Master]))
+
+        // Last gain written to the music source. The Engine re-pushes every bus on every frame, so
+        // without this a steady mix still costs two native writes per frame. A frame that does move
+        // the gain writes twice (Master is pushed before Music, so the first write carries the
+        // previous frame's Music), which is inaudible: both land before the Engine returns and the
+        // device renders. A negative sentinel cannot equal a clamped gain, so the first write always
+        // lands.
+        let mutable appliedMusicGain = -1.0f
+
+        // Push the current Music*Master gain at the playing music source, if it has moved. Nothing
+        // else writes that source's gain, so the memo cannot go stale.
+        let applyMusicGain () =
+            let gain = musicGain ()
+            match musicSource with
+            | Some src when gain <> appliedMusicGain ->
+                al.SetSourceProperty(src, SourceFloat.Gain, gain)
+                appliedMusicGain <- gain
+            | _ -> ()
+
         let loadBuffer (bytes: byte[]) : uint option =
             match Wav.tryParse bytes with
             | None -> None
@@ -139,30 +189,47 @@ module private OpenAl =
                     buffers.Add buf
                     Some buf
 
-        let startSource (buf: uint) (loop: bool) (gain: float32) : uint =
+        // Every source is listener-relative with the distance model switched off, so its position is
+        // read as a pure direction and the gain we pass is the gain that plays. `position` is None
+        // for a non-positional voice, which then sits exactly at the listener (dead centre, and
+        // unattenuated no matter where the listener has moved to).
+        // OpenAL spatializes mono buffers only — a stereo asset plays centred whatever we set here.
+        let startSource (buf: uint) (loop: bool) (gain: float32) (position: (float * float * float) option) : uint =
             let src = al.GenSource()
             al.SetSourceProperty(src, SourceInteger.Buffer, int buf)
             al.SetSourceProperty(src, SourceBoolean.Looping, loop)
             al.SetSourceProperty(src, SourceFloat.Gain, gain)
+            al.SetSourceProperty(src, SourceBoolean.SourceRelative, true)
+            al.SetSourceProperty(src, SourceFloat.RolloffFactor, 0.0f)
+            let (px, py, pz) = defaultArg position (0.0, 0.0, 0.0)
+            al.SetSourceProperty(src, SourceVector3.Position, float32 px, float32 py, float32 pz)
             al.SourcePlay src
             sources.Add src
             src
+
+        // Play a resolved one-shot; `position` None => non-positional.
+        let playOneShot (sound: SoundId) (gain: float32) (position: (float * float * float) option) =
+            match resolver.ResolveSound sound with
+            | Some bytes ->
+                match loadBuffer bytes with
+                | Some buf -> startSource buf false gain position |> ignore
+                | None -> ()
+            | None -> ()
 
         interface IAudioBackend with
             member _.Play(effect: AudioEffect) =
                 try
                     match effect with
-                    // PlaySfx3D on the raw backend degrades to a non-positional one-shot at the
-                    // carried gain (004); the Engine spatializes via IMixingBackend.PlayAt.
+                    // A PlaySfx3D that arrives here was dispatched straight at the backend rather
+                    // than through FS.GG.Audio.Engine, so nothing has spatialized it: the position
+                    // is in the product's world frame and the backend has no listener to relate it
+                    // to. Degrade to a non-positional one-shot at the carried gain (004). Driven by
+                    // the Engine, 3D voices arrive pre-spatialized through PlayAt below.
                     | PlaySfx(sound, volume)
-                    | PlaySfx3D(sound, _, _, _, volume) ->
-                        match resolver.ResolveSound sound with
-                        | Some bytes ->
-                            match loadBuffer bytes with
-                            | Some buf -> startSource buf false (float32 volume) |> ignore
-                            | None -> ()
-                        | None -> ()
-                    // Bus mixing / ducking are realized by FS.GG.Audio.Engine, not the raw backend.
+                    | PlaySfx3D(sound, _, _, _, volume) -> playOneShot sound (float32 volume) None
+                    // Bus mixing / ducking are envelopes over time: the raw backend has no clock, so
+                    // FS.GG.Audio.Engine advances them and pushes the realized gains through
+                    // IMixingBackend.SetBusGain below.
                     | SetBusVolume _
                     | Duck _ -> ()
                     | PlayMusic(track, loop) ->
@@ -171,7 +238,9 @@ module private OpenAl =
                             match loadBuffer bytes with
                             | Some buf ->
                                 musicSource |> Option.iter al.SourceStop
-                                musicSource <- Some(startSource buf loop 1.0f)
+                                let gain = musicGain ()
+                                musicSource <- Some(startSource buf loop gain None)
+                                appliedMusicGain <- gain
                             | None -> ()
                         | None -> ()
                     | StopMusic ->
@@ -193,6 +262,27 @@ module private OpenAl =
                     al.Dispose()
                     alc.Dispose()
                 with _ -> ()
+
+        interface IMixingBackend with
+            member _.SetBusGain(bus: Bus, gain: float) =
+                try
+                    busGains.[bus] <- gain
+                    // Only the music voice is left for the backend to scale, and it is long-lived:
+                    // a fade or a duck has to reach the source that is already playing. The one-shot
+                    // buses (Sfx, Ui, Ambient) are folded into each voice's gain before PlayAt.
+                    if bus = Music || bus = Master then applyMusicGain ()
+                with _ -> ()
+
+            member _.SetListener(x: float, y: float, z: float) =
+                try
+                    // Mirrored into the device for truthfulness, though today's sources are all
+                    // listener-relative and so read positions as directions, ignoring it. The
+                    // Engine's listener remains the single source of truth for attenuation and pan.
+                    al.SetListenerProperty(ListenerVector3.Position, float32 x, float32 y, float32 z)
+                with _ -> ()
+
+            member _.PlayAt(sound: SoundId, gain: float, pan: float) =
+                try playOneShot sound (float32 gain) (Some(Spatial.panToPosition pan)) with _ -> ()
 
 [<RequireQualifiedAccess>]
 module OpenAlBackend =
