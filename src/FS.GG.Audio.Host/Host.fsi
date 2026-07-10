@@ -48,6 +48,17 @@ module Wav =
     /// it does not understand rather than throwing.
     val tryParse: bytes: byte[] -> PcmData option
 
+/// Public contract module. The pure pan -> source-position mapping the OpenAL backend spatializes
+/// through (#11). No device, no OpenAL types.
+[<RequireQualifiedAccess>]
+module Spatial =
+
+    /// Map a stereo pan in `[-1, 1]` (as `IMixingBackend.PlayAt` carries it) to a source position in
+    /// the listener's own frame: `-1` hard left, `0` dead ahead, `+1` hard right. Total — pan is
+    /// clamped and `nan` centres. The result is always unit-length, which is what keeps a device's
+    /// distance model from attenuating a gain `FS.GG.Audio.Engine` has already attenuated.
+    val panToPosition: pan: float -> float * float * float
+
 /// Public contract module. The imperative drive (FR-006).
 [<RequireQualifiedAccess>]
 module Audio =
@@ -79,4 +90,11 @@ module OpenAlBackend =
     /// or the OpenAL Soft native library is unavailable, log the reason and return a Null backend
     /// instead (degrade-to-zero, FR-004) — the returned IAudioBackend is always usable, never null,
     /// and never throws into game code.
+    ///
+    /// The device backend also implements `IMixingBackend` (#11), so driven by `FS.GG.Audio.Engine`
+    /// it spatializes: pan reaches the hardware, and bus fades/ducks reach the music voice. Test it
+    /// with `:? IMixingBackend` rather than assuming — the Null fallback does not, which is exactly
+    /// what makes the Engine take its non-positional degrade path on a machine with no device.
+    /// Spatialization is per-source, so a positional sound must be a **mono** asset; OpenAL plays a
+    /// stereo buffer centred, whatever position it is given.
     val create: resolver: AssetResolver -> IAudioBackend
