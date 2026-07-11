@@ -2,6 +2,28 @@ name: gate
 
 # Required check for FS.GG.Audio: deterministic locked-restore build + full headless test suite on
 # every push/PR to main. Never publishes (that is release.yml, tag-triggered only).
+#
+# "Required" is literally true only since #60. Before it, `main` carried no branch protection and no
+# rulesets, so every assertion below — the cold locked restore (#429), the non-vacuous headless device
+# lane (#42), the readme/pack check (#8), the lock-range coherence gate (#54) — ran, reported, and
+# BLOCKED NOTHING. A red gate was advisory: the repo's own recurring defect one level up, not a gate
+# that reports green over a missing subject but a gate whose verdict had no subject to act on.
+# Protection now requires exactly two contexts:
+#
+#     Build + test (locked restore, net10.0, headless)   <- the build-test job's `name:`
+#     lock-ranges / lock-ranges                          <- `<job id> / <reusable workflow's job name>`
+#
+# Those strings are the binding, they are matched LITERALLY, and they live in repo settings — out of
+# tree, which is both why this file cannot enforce them and why this comment can drift from them.
+# The trap that buys: renaming the `build-test` job's `name:`, or the `lock-ranges` job id, does not
+# relabel the required check. It makes the required context stop reporting — and a context that never
+# reports is never satisfied, so every PR blocks forever on a check that will never arrive, with
+# enforce_admins on and no bypass. Rename either and you must update the contexts in the same change:
+#
+#     gh api repos/FS-GG/FS.GG.Audio/branches/main/protection
+#
+# `kit / coordination-kit` reports on PRs here but is deliberately NOT required, matching
+# FS.GG.SDD and FS.GG.Rendering: both report it, neither gates on it.
 
 on:
   push:
