@@ -29,6 +29,11 @@ module Audio =
         /// in dispatch order, when the Elmish runtime executes it. Dispatches no message.
         /// No mixing is applied — `SetBusVolume`/`Duck` are backend no-ops and `PlaySfx3D` plays
         /// non-positional. For bus mixing / fades / ducking / 3D, use `ofEngine` instead.
+        ///
+        /// That drop is no longer SILENT (#29). This delegates to `FS.GG.Audio.Host`'s `Audio.play`
+        /// rather than driving the backend itself, so the first batch carrying an effect the raw path
+        /// cannot realize logs one diagnostic to stderr — naming `ofEngine` as the destination that
+        /// does realize it. Playback is unchanged; only the silence is.
         val ofEffects: backend: IAudioBackend -> effects: AudioEffect list -> Elmish.Cmd<'msg>
 
         /// ENGINE-BACKED path: a command that advances the supplied engine by `dt` and realizes the

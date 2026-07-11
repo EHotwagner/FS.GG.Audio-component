@@ -303,6 +303,12 @@ module Audio =
     /// carries such an effect logs one diagnostic to stderr naming the surface that does realize it —
     /// `FS.GG.Audio.Engine`'s `Engine.createSink`, an `AudioEffect list -> unit` of this exact shape.
     /// Keep `play` for deliberate fire-and-forget playback.
+    ///
+    /// This is THE raw drive, not merely one of them: `FS.GG.Audio.Elmish`'s `Audio.Cmd.ofEffects`
+    /// delegates here (#29), so the dispatch-order guarantee and the diagnostic are the same on both
+    /// surfaces. The warn-once latch is therefore shared and process-wide, and the message names the
+    /// engine-backed destination for each surface (`Engine.createSink` here, `Audio.Cmd.ofEngine` in
+    /// Elmish) rather than assuming which one dropped the effect.
     val play: backend: IAudioBackend -> effects: AudioEffect list -> unit
 
 /// Public contract module. The deterministic, headless record-only backend — the default and

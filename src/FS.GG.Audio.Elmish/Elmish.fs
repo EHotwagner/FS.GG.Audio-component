@@ -7,6 +7,10 @@ open FS.GG.Audio.Engine
 // Reach Core's Audio module without colliding with this package's own `Audio` module below.
 module CoreAudio = FS.GG.Audio.Core.Audio
 
+// Likewise Host's `Audio` module: `ofEffects` DELEGATES to its `play` rather than re-driving the
+// backend itself (#29), so the raw path has one implementation, not two.
+module HostAudio = FS.GG.Audio.Host.Audio
+
 [<RequireQualifiedAccess>]
 module Audio =
 
@@ -19,9 +23,14 @@ module Audio =
             // This is the RAW-BACKEND bridge: effects go straight at IAudioBackend with no bus
             // mixing/fades/ducking/3D — SetBusVolume/Duck are backend no-ops and PlaySfx3D degrades
             // to non-positional. Use `ofEngine` when those semantics matter.
-            Elmish.Cmd.ofEffect (fun _dispatch ->
-                for effect in effects do
-                    backend.Play effect)
+            //
+            // `HostAudio.play`, NOT an inline `for` over `backend.Play` (#29). The loop was a second
+            // implementation of "fold a batch through the backend in dispatch order", and the two had
+            // to stay in agreement by hand — only Host's has the FR-006 dispatch-order test behind it.
+            // Worse, it bypassed the #27 diagnostic: the SetBusVolume/Duck drop above is SILENT, and
+            // an Elmish product with a dead volume slider got a dropped effect, no error, and nothing
+            // on any channel. Delegating makes this path inherit the warning for free.
+            Elmish.Cmd.ofEffect (fun _dispatch -> HostAudio.play backend effects)
 
         let ofEngine (engine: T) (dt: float) (effects: AudioEffect list) : Elmish.Cmd<'msg> =
             // Route the batch THROUGH the Engine rather than straight at the backend, so bus volume,

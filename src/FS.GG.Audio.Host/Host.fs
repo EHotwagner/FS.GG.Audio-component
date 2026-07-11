@@ -429,10 +429,23 @@ module Audio =
         // The drop used to be silent, which is the whole of #27: the effect is a well-formed value,
         // the sink accepts it, and nothing happens — no error, no diagnostic, no type error. Say so
         // once, and name the surface that does realize it.
+        //
+        // Every raw drive in the org funnels through here — Elmish's Audio.Cmd.ofEffects delegates
+        // to this rather than re-driving the backend itself (#29), which is what earns it this
+        // diagnostic. So the message must NOT name one caller: it describes what happened (a batch
+        // reached IAudioBackend directly) and names the destination on BOTH surfaces, because the
+        // one latch below fires for whichever gets there first and the reader needs THEIR fix. An
+        // Elmish product told to "use Engine.createSink" would be reading about a function it has no
+        // reason to call.
+        // MODAL, not past-tense: this fires for a batch carrying ANY requiresEngine effect, so it
+        // cannot say which ones were in it. "SetBusVolume/Duck were dropped" would tell a caller
+        // whose batch held only a PlaySfx3D that two effects it never sent had been discarded — a
+        // diagnostic asserting something that did not happen, which is the same species of lie as
+        // the silence this family exists to end (#27/#28/#33). Describe what the PATH does.
         if not warnedRawDrop && List.exists requiresEngine effects then
             warnedRawDrop <- true
             eprintfn
-                "FS.GG.Audio.Host: Audio.play drives the backend directly and cannot realize SetBusVolume/Duck (dropped) or PlaySfx3D (played non-positional) — a volume slider wired this way does nothing. Build the sink with FS.GG.Audio.Engine's Engine.createSink, which mixes; keep Audio.play for deliberate fire-and-forget playback."
+                "FS.GG.Audio: a batch reached IAudioBackend directly, which has no mixer and no clock — this path DROPS SetBusVolume/Duck and degrades PlaySfx3D to non-positional, so a volume slider wired this way does nothing. FS.GG.Audio.Engine realizes them: build the sink with Engine.createSink (raw host drive), or return Audio.Cmd.ofEngine instead of Audio.Cmd.ofEffects (Elmish). Keep the raw path for deliberate fire-and-forget playback."
         for effect in effects do
             backend.Play effect
 
