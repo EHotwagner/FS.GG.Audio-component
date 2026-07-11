@@ -17,82 +17,41 @@ permissions:
   contents: read
 
 jobs:
+  # The blind spot --locked-mode CANNOT cover (#51): it validates package entries — id, version,
+  # contentHash — but never the dependency ranges under a `"type": "Project"` entry. A release bump
+  # that edits a version WITHOUT regenerating the locks therefore freezes every project-reference
+  # range at the old version, and every gate stays green over it; main carried six stale ranges
+  # through the whole v0.2.0 cycle. Harmless at runtime (project references resolve from the project
+  # graph, not the lock), which is exactly why it survives — the cost is a poisoned lock diff.
+  #
+  # Proved here in #52 as ~71 lines of inline bash, then lifted into a reusable workflow by
+  # .github#495 so the check is authored once and cannot drift per repo (#54). Static: committed
+  # files only — no restore, no SDK, no network, no feed — so it needs nothing beyond contents: read.
+  #
+  # The shared gate resolves each project's own effective <Version> rather than this repo's central
+  # <FsGgAudioVersion>, because that is the only rule true of all three receivers. For Audio the two
+  # agree exactly: every project sets <Version>$(FsGgAudioVersion)</Version>.
+  #
+  # min-ranges is this repo's DECLARED subject count, not the default floor of 1. The default only
+  # catches a drop to zero, and the way this check degrades is not to zero: a range is matched by
+  # looking its dependency up among the package ids this repo's projects produce, so if that
+  # resolution drifts — a renamed <PackageId>, a lock that keys its entries differently — the
+  # unmatched ranges are silently SKIPPED rather than failed. 16 of 17 could vanish and a floor of 1
+  # would still print "ok". Declaring 17 makes that a red gate. It cannot cry wolf on growth: adding
+  # a project, a reference or a TFM only raises the count, and the floor trips only on a genuine
+  # reduction — which is a decision someone should have to make explicitly. (Epic #266, and #416's
+  # silent-no-op family: "nothing to check" and "checked, and it is fine" must not share an exit code.)
+  lock-ranges:
+    uses: FS-GG/.github/.github/workflows/lock-range-coherence.yml@main
+    with:
+      min-ranges: 17
+
   build-test:
     name: Build + test (locked restore, net10.0, headless)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
-
-      # A blind spot --locked-mode CANNOT cover (#51). `dotnet restore --locked-mode` validates
-      # package entries — it never looks at the dependency ranges under a `"type": "Project"` entry.
-      # So a release version bump that edits <FsGgAudioVersion> WITHOUT regenerating the locks leaves
-      # every project-reference range recording the OLD version, and every gate stays green over it:
-      #
-      #   "fs.gg.audio.engine": { "type": "Project", "dependencies": {
-      #      "FS.GG.Audio.Core": "[0.1.0, )"     <- Directory.Packages.props already says 0.2.0
-      #
-      # That is not hypothetical — 2c208f3 (0.1.0 -> 0.2.0) did exactly this, and main carried six
-      # stale ranges through the whole v0.2.0 cycle until an unrelated lock regeneration (#50) washed
-      # them out by accident. Functionally harmless (project references resolve from the project
-      # graph, not the lock), which is precisely why nobody catches it: the cost is a POISONED LOCK
-      # DIFF. The next reviewer who has to scrutinise a contentHash — the value that proves the
-      # package restored is the package the lock recorded — reads it mixed with release-bump residue.
-      #
-      # Static: committed files only, no restore, no network, no feed. It runs BEFORE setup-dotnet
-      # because it needs neither. Assert, don't remember — a rule enforced only by a checklist is a
-      # rule that will be re-broken at the next bump.
-      - name: Assert the locks' project ranges track <FsGgAudioVersion> (static, no restore)
-        run: |
-          set -euo pipefail
-
-          truth="$(grep -oP '(?<=<FsGgAudioVersion>)[^<]+' Directory.Packages.props | head -n1 || true)"
-          [ -n "$truth" ] || { echo "::error::<FsGgAudioVersion> not found in Directory.Packages.props — cannot establish the version-of-truth to check the locks against."; exit 1; }
-
-          # Compare against the version NuGet WRITES, not the one we typed. SemVer2 build metadata is
-          # not part of NuGet version identity, so it is dropped from a range: <FsGgAudioVersion> of
-          # `0.2.0+ci` lands in the lock as `[0.2.0, )` — the same normalization the pack step below
-          # already has to work around when it globs the .nupkg name. Comparing the raw string would
-          # red the gate on a perfectly correct +ci bump, and a guard that cries wolf gets deleted.
-          want="[${truth%%+*}, )"
-          echo "version-of-truth: $truth  ->  every FS.GG.Audio.* project range must read '$want'"
-
-          locks="$(git ls-files '*packages.lock.json')"
-          [ -n "$locks" ] || { echo "::error::no committed packages.lock.json found — this repo pins its restores (ADR-0006); a gate that checks zero lock files is not a gate."; exit 1; }
-
-          # Every FS.GG.Audio.* range under a "type": "Project" entry, across every lock and every
-          # target framework, as: <file> <tfm> <project> <dependency> <range>.
-          subjects="$(
-            for f in $locks; do
-              jq -r --arg f "$f" '
-                .dependencies // {} | to_entries[] as {key:$tfm, value:$deps}
-                | $deps | to_entries[]
-                | select(.value.type == "Project")
-                | .key as $proj
-                | (.value.dependencies // {}) | to_entries[]
-                | select(.key | test("^FS\\.GG\\.Audio\\."; "i"))
-                | [$f, $tfm, $proj, .key, .value] | @tsv' "$f"
-            done
-          )"
-
-          # FAIL CLOSED on an empty subject set (epic .github#416, the silent no-op family). Zero
-          # ranges means the lock schema moved or the jq stopped matching — NOT that everything is
-          # fine. A check that inspects nothing and reports green is the defect, not the guard.
-          n="$( { printf '%s' "$subjects" | grep -c . ; } || true )"
-          if [ "${n:-0}" -eq 0 ]; then
-            echo "::error::inspected 0 project-reference ranges across $(printf '%s\n' $locks | grep -c .) lock file(s). The FS.GG.Audio.* projects DO reference each other, so this must never be empty — the lock format or the query has drifted. Refusing to report green off a check with no subject."
-            exit 1
-          fi
-
-          bad="$(printf '%s\n' "$subjects" | awk -v want="$want" -F'\t' '$5 != want')"
-          if [ -n "$bad" ]; then
-            echo "::group::stale project-reference ranges (expected '$want')"
-            printf '%s\n' "$bad" | awk -F'\t' '{printf "  %s  [%s]  %s -> %s : %s\n", $1, $2, $3, $4, $5}'
-            echo "::endgroup::"
-            echo "::error::$(printf '%s\n' "$bad" | grep -c .) of $n project-reference range(s) do not match <FsGgAudioVersion> ($truth). A version bump must regenerate the lock files, so the bump commit carries its own lock churn instead of poisoning a later reviewer's diff. Fix: dotnet restore FS.GG.Audio.slnx --force-evaluate  (cold, per ADR-0032) and commit the updated lock files."
-            exit 1
-          fi
-          echo "all $n project-reference range(s) track <FsGgAudioVersion> ($truth)."
 
       - uses: actions/setup-dotnet@v5
         with:
