@@ -110,7 +110,7 @@ let tests =
 
                 let text = captured.ToString()
                 let occurrences =
-                    text.Split([| "Audio.play drives the backend directly" |], System.StringSplitOptions.None).Length - 1
+                    text.Split([| "reached IAudioBackend directly" |], System.StringSplitOptions.None).Length - 1
 
                 // The drop is no longer silent...
                 Expect.stringContains text "SetBusVolume" "the diagnostic names the effect that was dropped"
