@@ -37,7 +37,7 @@ type Duck =
       Amount: float }
 
 [<Sealed>]
-type T(config: SpatialConfig, backend: IAudioBackend) =
+type T(config: SpatialConfig, backend: IAudioBackend, device: DeviceDiagnostics.T) =
     let buses = [ Master; Music; Sfx; Ui; Ambient ]
     let baseGain = Dictionary<Bus, float>()
     do for b in buses do baseGain.[b] <- 1.0
@@ -113,6 +113,7 @@ type T(config: SpatialConfig, backend: IAudioBackend) =
 
     member _.Listener = listener
     member _.LastVoices = lastVoices
+    member _.Device = device
 
     member _.SetListener(x: float, y: float, z: float) = listener <- (x, y, z)
 
@@ -161,29 +162,65 @@ type T(config: SpatialConfig, backend: IAudioBackend) =
                     voices.Add { Sound = sound; Bus = Sfx; RequestGain = volume; EffectiveGain = eff; Pan = 0.0; Positional = false }
         lastVoices <- List.ofSeq voices
         // 3. realize through the backend (guarded; a device hiccup is silence, not a throw).
+        //
+        // The guard stays exactly as strong as it was — nothing here throws into game code (FR-008,
+        // Principle VIII) — but it is no longer MUTE (#33). "A device hiccup is silence" is a true
+        // account of a hiccup and a false account of a dead device: when the backend throws every
+        // frame (yanked device, dead driver), the game keeps running, the mixer keeps advancing
+        // envelopes, and every frame is silently dropped, forever, with nothing on any channel. The
+        // latch names the first fault, and — once the run is long enough that a hiccup is no longer a
+        // credible explanation — names it again as the permanent thing it is. A frame that realizes
+        // cleanly ends the run, so a device that recovers is never accused of having died.
+        //
+        // `reached` is load-bearing, not bookkeeping. Most frames of a real game carry no audio at
+        // all, and against a plain (non-mixing) backend such a frame makes NO device call whatever.
+        // Counting it a success would end the fault run — so a dead device, in a game that plays a
+        // sound every few frames rather than every single one, would never accumulate a run, never be
+        // escalated, and would go straight back to being indefinite, unexplained silence. A frame that
+        // never spoke to the device is evidence of nothing, and must leave the run as it found it.
+        let mutable reached = false
         try
             match mixing with
             | Some m ->
                 for b in buses do m.SetBusGain(b, busGain b)
                 let (lx, ly, lz) = listener
                 m.SetListener(lx, ly, lz)
+                reached <- true
             | None -> ()
             for effect in effects do
                 match effect with
-                | PlayMusic(track, loop) -> backend.Play(PlayMusic(track, loop))
-                | StopMusic -> backend.Play StopMusic
+                | PlayMusic(track, loop) ->
+                    backend.Play(PlayMusic(track, loop))
+                    reached <- true
+                | StopMusic ->
+                    backend.Play StopMusic
+                    reached <- true
                 | _ -> ()
             for v in lastVoices do
-                match mixing with
-                | Some m -> m.PlayAt(v.Sound, v.EffectiveGain, v.Pan)
-                | None -> backend.Play(PlaySfx(v.Sound, v.EffectiveGain))
-        with _ -> ()
+                (match mixing with
+                 | Some m -> m.PlayAt(v.Sound, v.EffectiveGain, v.Pan)
+                 | None -> backend.Play(PlaySfx(v.Sound, v.EffectiveGain)))
+                reached <- true
+            if reached then device.Succeeded DeviceDiagnostics.Realize
+        with error ->
+            device.Report(DeviceDiagnostics.Realize, error)
 
 [<RequireQualifiedAccess>]
 module Engine =
     let defaultSpatial = { RefDistance = 1.0; Rolloff = 1.0; MaxDistance = None }
-    let create (backend: IAudioBackend) = T(defaultSpatial, backend)
-    let createWith (config: SpatialConfig) (backend: IAudioBackend) = T(config, backend)
+
+    // Device faults go to stderr by default — the channel FS.GG.Audio.Host already warns on (the
+    // missing-asset diagnostic, the voice ceiling, OpenAL-unavailable). A lambda, not the shorter
+    // `DeviceDiagnostics.T(eprintfn "%s")`: the partial application would bind Console.Error ONCE,
+    // here, pinning the latch to the writer that existed at construction — so a later
+    // Console.SetError would never see the line. Host.fs makes the same choice for the same reason.
+    let private stderrDevice () = DeviceDiagnostics.T(fun line -> eprintfn "%s" line)
+
+    let create (backend: IAudioBackend) = T(defaultSpatial, backend, stderrDevice ())
+    let createWith (config: SpatialConfig) (backend: IAudioBackend) = T(config, backend, stderrDevice ())
+
+    let createWithDiagnostics (device: DeviceDiagnostics.T) (config: SpatialConfig) (backend: IAudioBackend) =
+        T(config, backend, device)
     let step (engine: T) (dt: float) (effects: AudioEffect list) = engine.Step(dt, effects)
     let fadeBus (engine: T) (bus: Bus) (target: float) (seconds: float) = engine.FadeBus(bus, target, seconds)
     let crossFade (engine: T) (fromBus: Bus) (toBus: Bus) (seconds: float) = engine.CrossFade(fromBus, toBus, seconds)

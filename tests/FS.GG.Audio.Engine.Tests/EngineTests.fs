@@ -27,10 +27,26 @@ type private RecordingMixingBackend() =
         member _.Play(e) = plays.Add e
         member _.Dispose() = ()
 
-// A backend that throws on every call — the engine must swallow it (FR-008).
+// A backend that throws on every call — the engine must swallow it (FR-008). Kept throwing forever,
+// it is also a device that has been yanked: the persistent fault of #33.
 type private ThrowingBackend() =
     interface IAudioBackend with
         member _.Play(_) = failwith "device on fire"
+        member _.Dispose() = ()
+
+// A backend that throws on its first `failures` plays and then works — the transient hiccup the
+// degrade exists for (#33). It must never be reported as a device that has died.
+type private FlakyBackend(failures: int) =
+    let mutable remaining = failures
+    let plays = ResizeArray<AudioEffect>()
+    member _.Plays = List.ofSeq plays
+    interface IAudioBackend with
+        member _.Play(e) =
+            if remaining > 0 then
+                remaining <- remaining - 1
+                failwith "device hiccup"
+            else
+                plays.Add e
         member _.Dispose() = ()
 
 let private mixing () = new RecordingMixingBackend()
@@ -162,6 +178,102 @@ let tests =
             let engine = Engine.create (new ThrowingBackend() :> IAudioBackend)
             Engine.step engine 0.016 [ CoreAudio.playSfx (SoundId "s") 1.0; CoreAudio.stopMusic ]
             Expect.isTrue true "step completed without an exception escaping into game code"
+        }
+
+        // --- #33: swallowing the throw is right; swallowing it SILENTLY, forever, is not. These
+        // drive the real production failure leg — a backend throwing inside Engine.step's realize
+        // pass — and assert on what reaches the diagnostic channel. ---
+
+        test "a persistently throwing backend is named, once, instead of silence forever (#33)" {
+            let lines = ResizeArray<string>()
+            let device = DeviceDiagnostics.T(lines.Add, 3)
+            let engine =
+                Engine.createWithDiagnostics device Engine.defaultSpatial (new ThrowingBackend() :> IAudioBackend)
+            let frame = [ CoreAudio.playSfx (SoundId "s") 1.0 ]
+
+            // The first faulting frame degrades to silence AND says so. It does not yet claim the
+            // device is dead: one throw really might be a hiccup.
+            Engine.step engine 0.016 frame
+            Expect.equal lines.Count 1 "the first device fault is named"
+            Expect.stringContains lines.[0] "SILENCE" "the first line names the consequence"
+            Expect.isFalse (device.IsPersistent DeviceDiagnostics.Realize) "one fault is not yet a dead device"
+
+            // It keeps faulting. At the threshold the run is escalated — once.
+            for _ in 1..2 do Engine.step engine 0.016 frame
+            Expect.equal lines.Count 2 "the run is escalated to a persistent fault"
+            Expect.stringContains lines.[1] "PERSISTENT" "the second line says the device is gone"
+            Expect.stringContains lines.[1] "OpenAlBackend.create" "and names the only way back"
+            Expect.isTrue (device.IsPersistent DeviceDiagnostics.Realize) "the leg is latched persistent"
+
+            // The defect this closes: 200 more dropped frames used to be 200 frames of unexplained
+            // quiet. They are still silent — but they are explained, and they do not spam.
+            for _ in 1..200 do Engine.step engine 0.016 frame
+            Expect.equal lines.Count 2 "warn-once: 200 further faulting frames emit nothing new"
+        }
+
+        test "a transient hiccup degrades to silence and is never called a dead device (#33, FR-008)" {
+            let lines = ResizeArray<string>()
+            let device = DeviceDiagnostics.T(lines.Add, 3)
+            let backend = new FlakyBackend(1)
+            let engine = Engine.createWithDiagnostics device Engine.defaultSpatial (backend :> IAudioBackend)
+            let frame = [ CoreAudio.playSfx (SoundId "s") 1.0 ]
+
+            for _ in 1..10 do Engine.step engine 0.016 frame
+
+            Expect.equal lines.Count 1 "the hiccup is named once, and never escalated"
+            Expect.isFalse (device.IsPersistent DeviceDiagnostics.Realize) "a device that recovered is not gone"
+            Expect.equal (device.ConsecutiveFaults DeviceDiagnostics.Realize) 0 "the run reset when it recovered"
+            Expect.equal backend.Plays.Length 9 "and the 9 frames after the hiccup actually played"
+        }
+
+        test "a healthy backend says nothing at all (#33)" {
+            let lines = ResizeArray<string>()
+            let device = DeviceDiagnostics.T(lines.Add, 3)
+            let engine = Engine.createWithDiagnostics device Engine.defaultSpatial (mixing () :> IAudioBackend)
+            for _ in 1..100 do Engine.step engine 0.016 [ CoreAudio.playSfx (SoundId "s") 1.0 ]
+            Expect.equal lines.Count 0 "a working device is not a diagnostic"
+        }
+
+        test "a dead device is escalated even when most frames carry no audio (#33)" {
+            // The regression this pins: a real game does NOT play a sound every frame. Against a plain
+            // backend a silent frame makes no device call at all, so if such a frame counted as a
+            // success it would end the fault run — and a permanently dead device would never build a
+            // run, never escalate, and go straight back to being unexplained silence. A frame that
+            // never spoke to the device must leave the run alone.
+            let lines = ResizeArray<string>()
+            let device = DeviceDiagnostics.T(lines.Add, 60)
+            let engine =
+                Engine.createWithDiagnostics device Engine.defaultSpatial (new ThrowingBackend() :> IAudioBackend)
+
+            for i in 1..600 do
+                let frame = if i % 3 = 0 then [ CoreAudio.playSfx (SoundId "step") 1.0 ] else []
+                Engine.step engine 0.016 frame
+
+            Expect.isTrue (device.IsPersistent DeviceDiagnostics.Realize) "the dead device IS escalated"
+            Expect.equal lines.Count 2 "and named exactly twice: the first fault, then the persistent one"
+            Expect.stringContains lines.[1] "PERSISTENT" "the escalation happened"
+        }
+
+        test "a device that comes back is not still reported dead (#33)" {
+            // A headset reconnects, a driver restarts. `IsPersistent` is a live predicate, not a
+            // latch — a product driving "audio is broken" UI off it must see the device recover — and
+            // the persistent-fault line, now untrue, is retracted rather than left standing.
+            let lines = ResizeArray<string>()
+            let device = DeviceDiagnostics.T(lines.Add, 3)
+            let backend = new FlakyBackend(10)
+            let engine = Engine.createWithDiagnostics device Engine.defaultSpatial (backend :> IAudioBackend)
+            let frame = [ CoreAudio.playSfx (SoundId "s") 1.0 ]
+
+            for _ in 1..10 do Engine.step engine 0.016 frame
+            Expect.isTrue (device.IsPersistent DeviceDiagnostics.Realize) "10 straight faults: it is gone"
+
+            // It comes back.
+            for _ in 1..30 do Engine.step engine 0.016 frame
+            Expect.isFalse (device.IsPersistent DeviceDiagnostics.Realize) "a device that recovered is not dead"
+            Expect.equal (device.ConsecutiveFaults DeviceDiagnostics.Realize) 0 "the run is over"
+            Expect.equal lines.Count 3 "first fault, persistent, and the retraction — once each"
+            Expect.stringContains lines.[2] "answering" "the retraction says the device came back"
+            Expect.equal backend.Plays.Length 30 "and it is genuinely playing again"
         }
 
         // --- #27: the sink — a mixing `AudioEffect list -> unit`, the shape a host product wires. ---

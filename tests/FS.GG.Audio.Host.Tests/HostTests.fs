@@ -362,4 +362,74 @@ let tests =
             Expect.equal lines.Count 3 "a track is not deduped against a sound with the same name"
             Expect.equal diagnostics.ReportedCount 3 "three distinct assets reported"
         }
+
+        // --- #33: the device-fault diagnostic. The OpenAL backend's guarded legs need a real device
+        // to reach in anger, so — exactly as for AssetDiagnostics above — the latch is device-free
+        // and is asserted directly. The Engine suite drives the same latch through a live failure. ---
+
+        test "DeviceDiagnostics.message names the operation, the degrade, and the way back (#33)" {
+            let error = System.InvalidOperationException "AL_INVALID_OPERATION" :> exn
+
+            let transient = DeviceDiagnostics.message DeviceDiagnostics.PlayAt DeviceDiagnostics.Transient error
+            Expect.stringContains transient "IMixingBackend.PlayAt" "the faulting operation is named"
+            Expect.stringContains transient "AL_INVALID_OPERATION" "the driver's own account survives"
+            Expect.stringContains transient "SILENCE" "the consequence is named"
+
+            // The escalated line has to carry what the first one cannot: that this is not a blip, and
+            // that nothing will play again until someone does something about it.
+            let persistent =
+                DeviceDiagnostics.message DeviceDiagnostics.PlayAt (DeviceDiagnostics.Persistent 60) error
+            Expect.stringContains persistent "PERSISTENT" "a dead device is called what it is"
+            Expect.stringContains persistent "60" "the length of the fault run is named"
+            Expect.stringContains persistent "OpenAlBackend.create" "and the fix is named"
+
+            // And the retraction, when it comes back: a diagnostic left standing after it stops being
+            // true is the same species of lie as one that was never emitted.
+            let back = DeviceDiagnostics.recovered DeviceDiagnostics.PlayAt 60
+            Expect.stringContains back "IMixingBackend.PlayAt" "the recovered operation is named"
+            Expect.stringContains back "again" "it says the device came back"
+        }
+
+        test "DeviceDiagnostics latches per operation: first fault once, persistent once (#33)" {
+            let lines = ResizeArray<string>()
+            let device = DeviceDiagnostics.T(lines.Add, 3)
+            let boom = System.Exception "device on fire"
+
+            device.Report(DeviceDiagnostics.PlayAt, boom)
+            Expect.equal lines.Count 1 "the first fault on an operation is named"
+            device.Report(DeviceDiagnostics.PlayAt, boom)
+            Expect.equal lines.Count 1 "a second fault is not a second line"
+            device.Report(DeviceDiagnostics.PlayAt, boom)
+            Expect.equal lines.Count 2 "the third consecutive fault crosses persistentAfter"
+            for _ in 1..100 do device.Report(DeviceDiagnostics.PlayAt, boom)
+            Expect.equal lines.Count 2 "and it escalates exactly once, however long it goes on"
+
+            // Operations are counted separately: a device answering SetBusGain while it fails every
+            // PlayAt is not the same animal as one that has stopped answering, and a working leg's
+            // success must not reset — or mask — a dead leg's run.
+            Expect.equal (device.ConsecutiveFaults DeviceDiagnostics.SetBusGain) 0 "counted on its own"
+            Expect.isTrue (device.IsPersistent DeviceDiagnostics.PlayAt) "PlayAt is gone"
+            device.Report(DeviceDiagnostics.SetBusGain, boom)
+            Expect.equal lines.Count 3 "the first fault on a second operation is news, and is reported"
+            Expect.isFalse (device.IsPersistent DeviceDiagnostics.SetBusGain) "one fault is not persistent"
+        }
+
+        test "a device that recovers ends its fault run — a hiccup is never escalated (#33)" {
+            // The distinction the whole issue turns on. Degrading a transient fault to silence is
+            // correct and must stay quiet-ish; degrading a PERMANENT one to silence is the defect.
+            let lines = ResizeArray<string>()
+            let device = DeviceDiagnostics.T(lines.Add, 3)
+            let boom = System.Exception "hiccup"
+
+            // Fail, fail, recover — twenty times over. The run never reaches the threshold, so this is
+            // named once as a hiccup and never accused of being a dead device.
+            for _ in 1..20 do
+                device.Report(DeviceDiagnostics.Realize, boom)
+                device.Report(DeviceDiagnostics.Realize, boom)
+                device.Succeeded DeviceDiagnostics.Realize
+
+            Expect.equal lines.Count 1 "forty faults, none of them a run, one line"
+            Expect.isFalse (device.IsPersistent DeviceDiagnostics.Realize) "a recovering device is not a dead one"
+            Expect.equal (device.ConsecutiveFaults DeviceDiagnostics.Realize) 0 "each success reset the run"
+        }
     ]

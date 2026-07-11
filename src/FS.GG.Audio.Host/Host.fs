@@ -268,6 +268,141 @@ module AssetDiagnostics =
         member _.ReportedCount = reported.Count
 
 [<RequireQualifiedAccess>]
+module DeviceDiagnostics =
+
+    // The guarded device call that threw (#33). Named rather than free-text because the latch counts
+    // fault runs PER operation: a device still answering SetBusGain while it fails every PlayAt is a
+    // different animal from one that has stopped answering at all, and collapsing them would let a
+    // working leg's success mask a dead one's run.
+    type Operation =
+        | Realize
+        | Play
+        | PlayAt
+        | SetBusGain
+        | SetListener
+
+    // A fault is a hiccup until it has repeated often enough that "hiccup" stops being a credible
+    // explanation. That distinction is the whole of #33: degrading a *transient* fault to silence is
+    // correct, and degrading a *persistent* one to silence is how a dead device becomes indefinite,
+    // unexplained quiet.
+    type Fault =
+        | Transient
+        | Persistent of consecutive: int
+
+    // The run length at which a fault stops being a hiccup. The engine realizes once per frame, so
+    // at 60 fps this is about a second of unbroken failure — long enough that a driver glitch would
+    // have cleared, short enough that a player is still wondering why the game went quiet.
+    [<Literal>]
+    let DefaultPersistentAfter = 60
+
+    let private describe (op: Operation) =
+        match op with
+        | Realize -> "Engine.step's realize pass"
+        | Play -> "IAudioBackend.Play"
+        | PlayAt -> "IMixingBackend.PlayAt"
+        | SetBusGain -> "IMixingBackend.SetBusGain"
+        | SetListener -> "IMixingBackend.SetListener"
+
+    // The line for one fault. A value rather than a print, so a test asserts on it directly. It
+    // carries the device's own exception text: this layer cannot say WHY a driver refused a call,
+    // and the driver's message is the only account of it anyone will get.
+    let message (op: Operation) (fault: Fault) (error: exn) : string =
+        let what = describe op
+        let why = sprintf "%s: %s" (error.GetType().Name) error.Message
+        match fault with
+        | Transient ->
+            sprintf
+                "FS.GG.Audio: the audio device threw on %s (%s). That call degraded to SILENCE rather than crashing, which is the right answer for a hiccup — playback continues. If the device is genuinely gone the fault will repeat, and this will say so again, once."
+                what
+                why
+        | Persistent consecutive ->
+            sprintf
+                "FS.GG.Audio: the audio device has thrown on %s for %d consecutive calls (%s) — this is a PERSISTENT fault, not a hiccup: the device is gone (unplugged, or its driver died). Everything this backend is asked to play is silent for as long as this lasts, and the game will keep running and mixing, inaudibly, without noticing. If it does not come back, rebuild the backend (OpenAlBackend.create) to reopen a device."
+                what
+                consecutive
+                why
+
+    // The retraction. A device CAN come back — a headset reconnects, a driver restarts — and when it
+    // does, the `Persistent` line above is left standing in the log as a claim that is no longer true.
+    // An unretracted diagnostic is the same species of lie as an absent one, which is the whole point
+    // of this family, so recovery is reported exactly once too.
+    let recovered (op: Operation) (afterConsecutive: int) : string =
+        sprintf
+            "FS.GG.Audio: the audio device is answering %s again, after %d consecutive faults — sound is audible once more. Disregard the persistent-fault line above; the device came back."
+            (describe op)
+            afterConsecutive
+
+    // A warn-once-per-operation latch over `message` that tracks each operation's run of consecutive
+    // faults, so a persistent fault can be told from a hiccup. Device-free (it holds operation names,
+    // counters and an emit callback — no OpenAL types), which is what lets BOTH failure legs be
+    // asserted headless: the device that faults in anger cannot be constructed without a device.
+    [<Sealed>]
+    type T(emit: string -> unit, persistentAfter: int) =
+        // A threshold below 1 would escalate before a single fault had been counted.
+        let persistentAfter = max 1 persistentAfter
+        let consecutive = Collections.Generic.Dictionary<Operation, int>()
+        let firstReported = Collections.Generic.HashSet<Operation>()
+        let persistentReported = Collections.Generic.HashSet<Operation>()
+        let recoveryReported = Collections.Generic.HashSet<Operation>()
+
+        new(emit: string -> unit) = T(emit, DefaultPersistentAfter)
+
+        // Report that `op` threw. Emits the first-fault line the FIRST time `op` faults, and the
+        // persistent-fault line once `op` has faulted `persistentAfter` times with NO intervening
+        // success — each at most once, ever.
+        //
+        // Warn-once is load-bearing, not politeness: these legs are re-entered on every frame (the
+        // engine realizes once a frame; the backend guards every device call), so a bare print here
+        // would emit a line per frame, for as long as the game runs, about a device that is dead and
+        // is going to stay dead.
+        member _.Report(op: Operation, error: exn) : unit =
+            let run =
+                match consecutive.TryGetValue op with
+                | true, n -> n + 1
+                | _ -> 1
+            consecutive.[op] <- run
+            if firstReported.Add op then
+                emit (message op Transient error)
+            if run >= persistentAfter && persistentReported.Add op then
+                emit (message op (Persistent run) error)
+
+        // Report that `op` REACHED THE DEVICE and completed. This ends its fault run: an operation
+        // that fails and then works is precisely the transient hiccup the degrade exists for, and it
+        // must never accumulate toward "persistent". Without this, a device that glitches once an
+        // hour would eventually be declared dead.
+        //
+        // Only ever call this for a call that actually touched the hardware. A no-op that reached no
+        // device says nothing about whether the device is alive, and passing it here would let a dead
+        // device be silently "recovered" by calls that never asked it for anything.
+        member _.Succeeded(op: Operation) : unit =
+            let run =
+                match consecutive.TryGetValue op with
+                | true, n -> n
+                | _ -> 0
+            consecutive.Remove op |> ignore
+            // It came back. If we said it was gone, say that we were wrong — once.
+            if run >= persistentAfter && persistentReported.Contains op && recoveryReported.Add op then
+                emit (recovered op run)
+
+        // `op`'s current run of consecutive faults — 0 once it has reached the device again.
+        member _.ConsecutiveFaults(op: Operation) : int =
+            match consecutive.TryGetValue op with
+            | true, n -> n
+            | _ -> 0
+
+        // Whether `op` is faulting persistently RIGHT NOW — a live predicate, not a latch. A device
+        // that died and came back is not a dead device, and a product driving "audio is broken" UI off
+        // this must see it recover; the warn-once behaviour belongs to the emitted lines, not here.
+        member _.IsPersistent(op: Operation) : bool =
+            match consecutive.TryGetValue op with
+            | true, n -> n >= persistentAfter
+            | _ -> false
+
+        // Lines emitted so far: one per operation that has faulted, one per operation that went
+        // persistent, and one per operation that came back from it.
+        member _.ReportedCount = firstReported.Count + persistentReported.Count + recoveryReported.Count
+
+[<RequireQualifiedAccess>]
 module Audio =
 
     // The effects a raw backend structurally CANNOT realize (#27). SetBusVolume and Duck are
@@ -396,14 +531,17 @@ module private OpenAl =
         let mutable appliedMusicGain = -1.0f
 
         // Push the current Music*Master gain at the playing music source, if it has moved. Nothing
-        // else writes that source's gain, so the memo cannot go stale.
-        let applyMusicGain () =
+        // else writes that source's gain, so the memo cannot go stale. Returns whether it actually
+        // wrote to the device (#33): with no music playing, or a gain that has not moved, this is a
+        // pure no-op and says nothing about whether the hardware is still answering.
+        let applyMusicGain () : bool =
             let gain = musicGain ()
             match musicSource with
             | Some src when gain <> appliedMusicGain ->
                 al.SetSourceProperty(src, SourceFloat.Gain, gain)
                 appliedMusicGain <- gain
-            | _ -> ()
+                true
+            | _ -> false
 
         // A missing or unplayable asset used to be pure silence (#28): both lookups below ended in a
         // bare `None`, so a typo'd or unshipped id played nothing and reported nothing, and a caller
@@ -415,6 +553,30 @@ module private OpenAl =
         // stderr) would never see the line. Every other eprintfn in this file is a direct call and
         // re-reads the writer; this matches them.
         let assetDiagnostics = AssetDiagnostics.T(fun line -> eprintfn "%s" line)
+
+        // Every device call below used to end in a bare `with _ -> ()` (#33): a throw from the driver
+        // was swallowed with nothing on any channel, so a device that had genuinely died was
+        // indistinguishable from a game that happened to be quiet. The degrade is UNCHANGED — a fault
+        // is still silence, never a throw into game code (FR-004, Principle VIII) — but it is no
+        // longer anonymous. Same writer discipline as `assetDiagnostics` above, and for the same
+        // reason: a lambda, not a partial application, so a later Console.SetError still sees it.
+        let deviceDiagnostics = DeviceDiagnostics.T(fun line -> eprintfn "%s" line)
+
+        // One guarded device call: run `action`, degrade a throw to silence, and route it through the
+        // latch — which names the fault once, and names it once more if the operation keeps failing
+        // and so is not a hiccup.
+        //
+        // `action` returns whether it actually REACHED the device. That distinction is load-bearing,
+        // not bookkeeping: plenty of calls through here touch no hardware at all (a `Duck` the raw
+        // path drops, a bus gain no music source is listening to, a one-shot whose asset never
+        // resolved). Such a call completing is no evidence the device is alive, so it must NOT end a
+        // fault run — otherwise a dead device is quietly "recovered" by the very calls that never
+        // asked it for anything, and the persistent fault is never reported.
+        let guarded (op: DeviceDiagnostics.Operation) (action: unit -> bool) : unit =
+            try
+                if action () then deviceDiagnostics.Succeeded op
+            with error ->
+                deviceDiagnostics.Report(op, error)
 
         // Decode + upload a WAV to a fresh AL buffer. Callers reach this only through the id-keyed
         // caches below, so a given asset is parsed and uploaded at most once. Failure says WHICH
@@ -474,8 +636,10 @@ module private OpenAl =
             al.SetSourceProperty(src, SourceVector3.Position, float32 px, float32 py, float32 pz)
             al.SourcePlay src
 
-        // Play a resolved one-shot on a pooled voice; `position` None => non-positional.
-        let playOneShot (sound: SoundId) (gain: float32) (position: (float * float * float) option) =
+        // Play a resolved one-shot on a pooled voice; `position` None => non-positional. Returns
+        // whether the voice reached the device — an id that resolves to nothing never gets near the
+        // hardware, so it is not evidence the hardware is alive (#33).
+        let playOneShot (sound: SoundId) (gain: float32) (position: (float * float * float) option) : bool =
             match soundBuffer sound with
             | Some buf ->
                 configureAndPlay (voices.Acquire()) buf false gain position
@@ -484,13 +648,16 @@ module private OpenAl =
                     eprintfn
                         "FS.GG.Audio.Host: OpenAL one-shot source ceiling (%d) reached; stealing the oldest voice per play — overlapping sounds will be dropped."
                         oneShotCeiling
+                true
             // Still a no-op — there is nothing to play — but no longer a *silent* one: soundBuffer
             // reported the id and the reason on its way to None (#28).
-            | None -> ()
+            | None -> false
 
         interface IAudioBackend with
             member _.Play(effect: AudioEffect) =
-                try
+                // Safe failure (Principle VIII): a device fault degrades to silence, not a crash —
+                // and `guarded` now says so rather than swallowing it whole (#33).
+                guarded DeviceDiagnostics.Play (fun () ->
                     match effect with
                     // A PlaySfx3D that arrives here was dispatched straight at the backend rather
                     // than through FS.GG.Audio.Engine, so nothing has spatialized it: the position
@@ -501,9 +668,9 @@ module private OpenAl =
                     | PlaySfx3D(sound, _, _, _, volume) -> playOneShot sound (float32 volume) None
                     // Bus mixing / ducking are envelopes over time: the raw backend has no clock, so
                     // FS.GG.Audio.Engine advances them and pushes the realized gains through
-                    // IMixingBackend.SetBusGain below.
+                    // IMixingBackend.SetBusGain below. They touch no hardware, hence `false`.
                     | SetBusVolume _
-                    | Duck _ -> ()
+                    | Duck _ -> false
                     | PlayMusic(track, loop) ->
                         match trackBuffer track with
                         | Some buf ->
@@ -520,19 +687,21 @@ module private OpenAl =
                             configureAndPlay src buf loop gain None
                             musicSource <- Some src
                             appliedMusicGain <- gain
+                            true
                         // As in playOneShot: nothing to play, but trackBuffer has already named the
                         // track and the reason (#28). The music voice is left exactly as it was — a
                         // missing new track does not stop the track that is playing.
-                        | None -> ()
+                        | None -> false
                     | StopMusic ->
+                        // Stopping music that is not playing reaches no device.
+                        let playing = musicSource.IsSome
                         musicSource |> Option.iter (fun s -> al.SourceStop s; al.DeleteSource s)
                         musicSource <- None
                         appliedMusicGain <- -1.0f
+                        playing
                     | SetMasterVolume level ->
                         al.SetListenerProperty(ListenerFloat.Gain, float32 level)
-                with _ ->
-                    // Safe failure (Principle VIII): a device hiccup degrades to silence, not a crash.
-                    ()
+                        true)
 
             member _.Dispose() =
                 try
@@ -548,24 +717,29 @@ module private OpenAl =
 
         interface IMixingBackend with
             member _.SetBusGain(bus: Bus, gain: float) =
-                try
+                guarded DeviceDiagnostics.SetBusGain (fun () ->
                     busGains.[bus] <- gain
                     // Only the music voice is left for the backend to scale, and it is long-lived:
                     // a fade or a duck has to reach the source that is already playing. The one-shot
-                    // buses (Sfx, Ui, Ambient) are folded into each voice's gain before PlayAt.
-                    if bus = Music || bus = Master then applyMusicGain ()
-                with _ -> ()
+                    // buses (Sfx, Ui, Ambient) are folded into each voice's gain before PlayAt — so
+                    // this writes to the device only for Music/Master, and only when music is up and
+                    // the gain has actually moved.
+                    (bus = Music || bus = Master) && applyMusicGain ())
 
             member _.SetListener(x: float, y: float, z: float) =
-                try
+                guarded DeviceDiagnostics.SetListener (fun () ->
                     // Mirrored into the device for truthfulness, though today's sources are all
                     // listener-relative and so read positions as directions, ignoring it. The
                     // Engine's listener remains the single source of truth for attenuation and pan.
+                    //
+                    // Unconditional, so it is the ONE call the Engine makes at the device every
+                    // single frame — which makes it the leg that reliably catches a dead device.
                     al.SetListenerProperty(ListenerVector3.Position, float32 x, float32 y, float32 z)
-                with _ -> ()
+                    true)
 
             member _.PlayAt(sound: SoundId, gain: float, pan: float) =
-                try playOneShot sound (float32 gain) (Some(Spatial.panToPosition pan)) with _ -> ()
+                guarded DeviceDiagnostics.PlayAt (fun () ->
+                    playOneShot sound (float32 gain) (Some(Spatial.panToPosition pan)))
 
 [<RequireQualifiedAccess>]
 module OpenAlBackend =

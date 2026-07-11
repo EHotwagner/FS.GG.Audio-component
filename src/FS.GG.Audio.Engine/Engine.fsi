@@ -36,6 +36,14 @@ type T =
     member Listener: float * float * float
     /// The one-shot voices realized on the most recent `step`, in dispatch order.
     member LastVoices: Voice list
+    /// The device-fault latch this engine's realize pass reports through (#33). Ask it whether the
+    /// backend is faulting persistently right now — `Device.IsPersistent DeviceDiagnostics.Realize` is
+    /// the machine-readable form of "nothing this process plays is currently audible".
+    ///
+    /// Note it reports the realize pass of a backend that throws AT the engine. The bundled OpenAL
+    /// backend guards its own device calls and so never throws this far; its faults surface on its own
+    /// latch, under `PlayAt`/`SetListener`/`SetBusGain`/`Play`.
+    member Device: DeviceDiagnostics.T
 
 /// Public contract module. Engine construction and the per-frame drive.
 [<RequireQualifiedAccess>]
@@ -50,6 +58,17 @@ module Engine =
 
     /// Create an engine over a backend with an explicit spatial configuration.
     val createWith: config: SpatialConfig -> backend: IAudioBackend -> T
+
+    /// As `createWith`, but device faults in the realize pass are reported through a caller-supplied
+    /// latch instead of the default (stderr) one (#33).
+    ///
+    /// Two reasons to reach for it. A product with a real log wants the "the audio device is gone"
+    /// line on its own channel rather than stderr, which a shipped game typically does not surface.
+    /// And a test wants to ASSERT the fault leg: the latch is device-free, so driving a throwing
+    /// backend through `step` and reading the emitted lines exercises the production failure path
+    /// headless — which is the only way this leg is covered by anything at all.
+    val createWithDiagnostics:
+        device: DeviceDiagnostics.T -> config: SpatialConfig -> backend: IAudioBackend -> T
 
     /// Advance the engine by `dt` seconds and apply a per-frame batch of effects, in order:
     /// completes elapsed fade/duck envelopes, applies the batch (bus/master sets, ducks, one-shot

@@ -181,6 +181,106 @@ module AssetDiagnostics =
         /// Distinct ids reported so far — one emitted line each.
         member ReportedCount: int
 
+/// Public contract module (#33). The device-fault diagnostic. Every guarded device call — the
+/// backend's `Play`/`PlayAt`/`SetBusGain`/`SetListener`, and `FS.GG.Audio.Engine`'s per-frame realize
+/// pass — used to end in a bare `with _ -> ()`. Degrading a fault to silence is correct and stays
+/// (FR-004, Principle VIII: a device hiccup must never crash a game), but it left a *persistent*
+/// fault — the device unplugged, the driver dead — indistinguishable from a game that is simply
+/// quiet: the process keeps running, the mixer keeps advancing envelopes, every frame is dropped,
+/// and nothing on any channel ever says so.
+///
+/// The fix is a message, not a throw. A fault run is counted per operation; the first fault is named
+/// once, and once the run is long enough that "hiccup" is no longer credible it is named once more,
+/// as what it is. A success ENDS the run — a device that fails and recovers is the transient case the
+/// degrade exists for, and is never escalated.
+///
+/// Device-free (it holds operation names, counters and an emit callback — no OpenAL types), which is
+/// what lets both failure legs be exercised headless: the backend that faults in anger needs a real
+/// device to construct.
+[<RequireQualifiedAccess>]
+module DeviceDiagnostics =
+
+    /// The guarded device call that threw. Fault runs are counted per operation: a device still
+    /// answering `SetBusGain` while it fails every `PlayAt` is not the same as one that has stopped
+    /// answering at all, and a working leg's success must not mask a dead leg's run.
+    type Operation =
+        /// `FS.GG.Audio.Engine`'s per-frame realize pass — the whole batch of device calls a `step`
+        /// makes. This is the leg that fails in production, on a player's machine.
+        | Realize
+        /// `IAudioBackend.Play`.
+        | Play
+        /// `IMixingBackend.PlayAt`.
+        | PlayAt
+        /// `IMixingBackend.SetBusGain`.
+        | SetBusGain
+        /// `IMixingBackend.SetListener`.
+        | SetListener
+
+    /// How bad a fault is, which is entirely a question of whether it has stopped.
+    type Fault =
+        /// A first, isolated fault. Degrading it to silence is right — this is the hiccup the
+        /// guard exists for — so the diagnostic says so and does not cry wolf.
+        | Transient
+        /// A run of `consecutive` faults with no intervening success: long enough that a driver
+        /// glitch would have cleared. The device is gone and playback is silent from here.
+        | Persistent of consecutive: int
+
+    /// The run length at which a fault stops being a hiccup and is reported as persistent. The engine
+    /// realizes once per frame, so at 60 fps this is roughly a second of unbroken failure.
+    [<Literal>]
+    val DefaultPersistentAfter: int = 60
+
+    /// The diagnostic line for one fault: the operation, the device's own exception text, the
+    /// consequence (silence), and — for a persistent fault — what to do about it. Pure and total: a
+    /// value rather than a print, so a test asserts on it.
+    val message: op: Operation -> fault: Fault -> error: exn -> string
+
+    /// The retraction line for an operation that has come back after a persistent fault. A device CAN
+    /// recover — a headset reconnects, a driver restarts — and the `Persistent` line is then left
+    /// standing in the log as a claim that is no longer true. An unretracted diagnostic is the same
+    /// species of lie as an absent one, so recovery is reported too. Pure and total.
+    val recovered: op: Operation -> afterConsecutive: int -> string
+
+    /// A warn-once-per-operation latch over `message`/`recovered`, tracking each operation's run of
+    /// consecutive faults.
+    [<Sealed>]
+    type T =
+        /// A latch emitting through `emit`, escalating to `Persistent` after `persistentAfter`
+        /// consecutive faults on one operation. The OpenAL backend and the Engine pass stderr (the
+        /// channel they already warn on); a test passes a buffer, and a product can pass its own log.
+        new: emit: (string -> unit) * persistentAfter: int -> T
+        /// As above, with `DefaultPersistentAfter`.
+        new: emit: (string -> unit) -> T
+        /// Report that `op` threw. Emits the first-fault line the FIRST time `op` faults, and the
+        /// persistent-fault line once `op`'s run reaches `persistentAfter` — each at most once, ever.
+        ///
+        /// Warn-once is load-bearing, not politeness: these legs are re-entered on every frame, so
+        /// printing from them would emit a line per frame, for as long as the game runs, about a
+        /// device that is dead and is going to stay dead.
+        member Report: op: Operation * error: exn -> unit
+        /// Report that `op` REACHED THE DEVICE and completed, ending its fault run — and, if it had
+        /// been reported persistent, emitting the retraction once. Without this a device that glitches
+        /// once an hour would eventually be declared dead.
+        ///
+        /// Call this ONLY for a call that actually touched the hardware. A no-op that reached no
+        /// device — a `Duck` the raw path drops, a bus gain with no music playing, a one-shot whose
+        /// asset never resolved, a frame carrying no audio at all — says nothing about whether the
+        /// device is alive. Passing one here would let a dead device be silently "recovered" by calls
+        /// that never asked it for anything, and its persistent fault would then never be reported:
+        /// a game that plays a sound every few frames rather than every frame would never accumulate
+        /// a run at all.
+        member Succeeded: op: Operation -> unit
+        /// `op`'s current run of consecutive faults — 0 once it has reached the device again.
+        member ConsecutiveFaults: op: Operation -> int
+        /// Whether `op` is faulting persistently RIGHT NOW: a live predicate, not a latch. This is the
+        /// machine-readable form of "nothing this backend plays is audible" — and because a device
+        /// that died and came back is not a dead device, it goes false again when the device answers.
+        /// The warn-once behaviour belongs to the emitted lines, not to this.
+        member IsPersistent: op: Operation -> bool
+        /// Lines emitted so far: one per faulting operation, one per operation gone persistent, and
+        /// one per operation that came back from it.
+        member ReportedCount: int
+
 /// Public contract module. The imperative drive (FR-006).
 [<RequireQualifiedAccess>]
 module Audio =
