@@ -62,8 +62,29 @@ type T(config: SpatialConfig, backend: IAudioBackend, device: DeviceDiagnostics.
         elif v > 1.0 then 1.0
         else v
 
+    // A fade duration that cannot schedule anything, and so has to be applied at once instead.
+    //
+    // `seconds <= 0` is the documented immediate leg and covers -infinity. `nan` is the one that bit:
+    // it fails BOTH comparisons, so it slipped past `<= 0`, installed a fade with a nan Duration, and
+    // that fade could never complete (`Elapsed >= nan` is false forever) and rendered a nan gain that
+    // clamped to 0. The bus went silent permanently, with no diagnostic — the exact "unexplained
+    // silence" this component's #33/#34 work exists to abolish, let in through a different door.
+    //
+    // +infinity is deliberately NOT folded in here, though `Double.IsFinite` would have been the
+    // tidier-looking guard. `nan` is nonsense with no intent to honour, so the defined floor is the
+    // right answer. An infinite duration is a coherent request — "never get there" — and treating it
+    // as immediate would make `fadeBus engine Music 0.0 infinity` silence the music INSTANTLY: the
+    // precise opposite of what the caller asked for, and a worse answer than doing nothing. Honoured,
+    // it holds the bus at its starting gain forever, which is what an infinitely slow fade is. That
+    // also matches Core: `Audio.duck` normalizes a nan duration to 0 and lets an infinite one through.
+    let isImmediate (seconds: float) = Double.IsNaN seconds || seconds <= 0.0
+
     let applyCurve curve (startG: float) (endG: float) (p: float) =
-        let p = if p < 0.0 then 0.0 elif p > 1.0 then 1.0 else p
+        // NaN-total, in the house style of clamp01 (`v <= 0.0 || Double.IsNaN v`). `isImmediate` above
+        // means no nan Duration is ever installed, so `p` cannot be nan today and this is defence in
+        // depth rather than the fix — it makes the function total on its own terms instead of on its
+        // caller's discipline, which is what let the nan through in the first place.
+        let p = if Double.IsNaN p || p < 0.0 then 0.0 elif p > 1.0 then 1.0 else p
         match curve with
         | Linear -> startG + (endG - startG) * p
         | EqualPowerOut -> startG * cos (p * Math.PI / 2.0)
@@ -146,14 +167,14 @@ type T(config: SpatialConfig, backend: IAudioBackend, device: DeviceDiagnostics.
 
     member _.FadeBus(bus: Bus, target: float, seconds: float) =
         let target = clamp01 target
-        if seconds <= 0.0 then
+        if isImmediate seconds then
             fades.Remove bus |> ignore
             baseGain.[bus] <- target
         else
             fades.[bus] <- { Elapsed = 0.0; Duration = seconds; StartG = busGain bus; EndG = target; Curve = Linear }
 
     member _.CrossFade(fromBus: Bus, toBus: Bus, seconds: float) =
-        if seconds <= 0.0 then
+        if isImmediate seconds then
             fades.Remove fromBus |> ignore
             fades.Remove toBus |> ignore
             baseGain.[fromBus] <- 0.0
@@ -171,7 +192,15 @@ type T(config: SpatialConfig, backend: IAudioBackend, device: DeviceDiagnostics.
             match effect with
             | SetMasterVolume level -> fades.Remove Master |> ignore; baseGain.[Master] <- clamp01 level
             | SetBusVolume(bus, level) -> fades.Remove bus |> ignore; baseGain.[bus] <- clamp01 level
-            | Duck(bus, amount, ms) -> ducks.[bus] <- { Elapsed = 0.0; Duration = ms / 1000.0; Amount = clamp01 amount }
+            // `isImmediate` on the millisecond value for the same reason as the fades: a nan `ms`
+            // gives a nan Duration, `duckOf` guards on `Duration > 0.0` so the duck is inert, and
+            // `advance` can never retire it (`Elapsed >= nan` is false forever) — an entry that
+            // outlives the process. Inert and bounded to five buses, so this was never the bug the
+            // fades were, but it is the same missing guard, and 0.0 is what Core's `Audio.duck`
+            // already normalizes a nan to.
+            | Duck(bus, amount, ms) ->
+                let ms = if isImmediate ms then 0.0 else ms
+                ducks.[bus] <- { Elapsed = 0.0; Duration = ms / 1000.0; Amount = clamp01 amount }
             | StopMusic -> music <- None
             | PlayMusic(track, loop) -> music <- Some(track, loop)
             | PlaySfx(sound, volume) ->

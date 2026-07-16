@@ -97,10 +97,22 @@ module Engine =
 
     /// Install a timed linear fade of a bus's base gain to `target` over `seconds` (DEC-003),
     /// realized as subsequent `step`s advance. `seconds <= 0` sets the gain immediately.
+    ///
+    /// Total on a non-finite `seconds`. `nan` sets the gain immediately, as `<= 0` does — it is not a
+    /// duration and there is no intent in it to honour. An INFINITE `seconds` is honoured as what it
+    /// says: a fade so slow it never arrives, holding the bus at its current gain. (It is not treated
+    /// as immediate, which would make `fadeBus engine Music 0.0 infinity` silence the music at once —
+    /// the opposite of the request.)
     val fadeBus: engine: T -> bus: Bus -> target: float -> seconds: float -> unit
 
     /// Install an equal-power cross-fade over `seconds` (DEC-003): `fromBus` ramps from its current
     /// gain down to 0 and `toBus` ramps from 0 up to unity, at constant summed power.
+    ///
+    /// `seconds` is treated exactly as `fadeBus` treats it, including the non-finite cases.
+    ///
+    /// Note `toBus` ramps to UNITY, not to whatever gain it was configured with — so a cross-fade
+    /// onto a bus the player had turned down will put it back to full and leave it there. That is
+    /// long-standing behaviour and is called out here rather than changed (review 2026-07-16 §3.7).
     val crossFade: engine: T -> fromBus: Bus -> toBus: Bus -> seconds: float -> unit
 
     /// Set the listener position (metres) used to resolve subsequent 3D voices (FR-005).
