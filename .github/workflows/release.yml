@@ -55,8 +55,11 @@ jobs:
           fi
       - name: Build (Debug, --no-restore)
         run: dotnet build FS.GG.Audio.slnx -c Debug --no-restore
-      - name: Test (full headless suite, --no-restore)
-        run: dotnet test FS.GG.Audio.slnx -c Debug --no-restore
+      # THE SAME device lane the PR gate runs, and for a better reason. This job ran a bare
+      # `dotnet test`: no driver selection, no skip assertion — so the device tests could quietly skip
+      # at the one moment that ships bytes to nuget.org, which is the vacuous lane gate.yml exists to
+      # prevent, reappearing in the workflow that publishes (review §3.12).
+      - uses: ./.github/actions/headless-test
 
   publish:
     name: Publish packages (org feed + nuget.org) + schema/apps assets
@@ -119,7 +122,14 @@ jobs:
           VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          dotnet restore FS.GG.Audio.slnx
+          # --locked-mode, as `verify` uses. This is a DIFFERENT JOB on a DIFFERENT RUNNER, so its
+          # restore is its own: without the flag, the graph that gets packed and pushed to nuget.org
+          # is not the graph `verify` validated, and the lockfiles guarantee nothing about what
+          # actually ships (review §3.12).
+          if ! dotnet restore FS.GG.Audio.slnx --locked-mode; then
+            echo "::error::locked restore failed in the PUBLISH job — the graph about to be packed does not match the committed packages.lock.json. Refusing to publish a set nobody verified."
+            exit 1
+          fi
           dotnet pack FS.GG.Audio.slnx -c Release -p:Version="$VER" -o artifacts/packages
           echo "Packed:"; ls -1 artifacts/packages/*.nupkg
 

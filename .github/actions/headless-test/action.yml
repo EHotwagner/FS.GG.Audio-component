@@ -1,0 +1,80 @@
+name: Headless test (real OpenAL device)
+description: >
+  Run the full test suite against a REAL OpenAL device via OpenAL Soft's null driver, and fail if any
+  test skipped. ONE implementation, used by gate.yml and release.yml.
+
+# WHY THIS IS AN ACTION AND NOT A COPY (review 2026-07-16 §3.12).
+# =============================================================
+# release.yml's verify job ran a bare `dotnet test`: no driver selection, and no skip assertion. So
+# the device lane — the thing gate.yml goes to some length to make non-vacuous, and which now carries
+# real assertions about buffer upload, source configuration and the pan mapping's contract with the
+# hardware (#126) — could quietly skip at the ONE moment that ships bytes to nuget.org. A release is
+# the worst possible place to discover you were testing a tape recorder.
+#
+# The obvious fix was to paste gate.yml's block into release.yml. That is two implementations of a
+# subtle, fail-closed shell contract, kept in agreement by hand — and this repo has already been bitten
+# there once: the first cut of the skip assertion summed with `bc`, which is not installed everywhere,
+# so the sum errored, `${skipped:-0}` swallowed it, and the check PASSED on a run with a skipped test.
+# A guard that silently never fires is the very defect it exists to catch. Doubling the surface for
+# that class of bug in order to close a gap of the same class would be its own punchline.
+
+runs:
+  using: composite
+  steps:
+    - name: Test (full headless suite, real OpenAL device via the null driver)
+      shell: bash
+      env:
+        # QUOTED, deliberately. Bare `null` is the YAML null scalar, so `ALSOFT_DRIVERS: null` sets
+        # the variable EMPTY — OpenAL falls back to the default drivers, finds no device, and the
+        # device lane silently goes unrun again. "null" is the driver's NAME.
+        ALSOFT_DRIVERS: "null"
+      run: |
+        set -euo pipefail
+
+        # Every linux-x64 native folder the build produced. `dotnet test` runs the whole solution,
+        # so collect them all rather than guessing which project carries the one that matters.
+        #
+        # ABSOLUTE paths, and that is not a style preference: LD_LIBRARY_PATH entries are resolved
+        # against each PROCESS's cwd, and the test host runs from the test project's OUTPUT
+        # directory, not the repo root. Relative entries therefore point nowhere, the lib goes
+        # unresolved, and you are back to a silent RecordOnly. (This exact bug cost a CI round-trip.)
+        #
+        # Belt AND braces: .NET also resolves this native itself, from the deps.json `runtimeTargets`
+        # entry, with no LD_LIBRARY_PATH at all — that is how the suite finds a device on a developer
+        # machine with no system OpenAL. So this export may well be redundant on the runner today.
+        # It is kept because it costs nothing, it is what was actually verified on the runner when
+        # #42 landed, and the assertion below — not this — is the part that has to be right.
+        native_dirs="$(find "$PWD" -type d -path '*/runtimes/linux-x64/native' | sort -u)"
+        if [ -z "$native_dirs" ]; then
+          echo "::error::no runtimes/linux-x64/native directory in the build output — the OpenAL native asset was not produced, so the device lane cannot run and this gate would silently test nothing."
+          exit 1
+        fi
+        LD_LIBRARY_PATH="$(printf '%s' "$native_dirs" | paste -sd: -)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        export LD_LIBRARY_PATH
+        echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+        dotnet test FS.GG.Audio.slnx -c Debug --no-restore 2>&1 | tee test-output.txt
+
+        # A skip is a REGRESSION, not a fact of life: with the lib resolved and the null driver
+        # selected, the device lane MUST execute. `dotnet test` cannot fail on skip, so assert it.
+        #
+        # FAIL CLOSED (epic .github#266). The first cut of this summed with `bc`, which is not
+        # installed everywhere; the sum errored, `${skipped:-0}` swallowed it, and the check PASSED
+        # on a run with a skipped test — a guard that silently never fires, which is the very defect
+        # it exists to catch. Hence: awk, and an unreadable summary is an ERROR, never a pass.
+        #
+        # Count OCCURRENCES, not lines: parallel `dotnet test` summaries interleave onto one line,
+        # so `grep -c` undercounts. The `|| true` is load-bearing: under `pipefail` a non-matching
+        # grep would abort the step before the diagnostic below could print.
+        counts="$( { grep -oE 'Skipped:[[:space:]]*[0-9]+' test-output.txt || true; } | grep -oE '[0-9]+' || true )"
+        summaries="$(printf '%s' "$counts" | grep -c . || true)"
+        if [ "${summaries:-0}" -eq 0 ]; then
+          echo "::error::could not read a test summary from dotnet test output — refusing to report a green gate off an unparsed result. Did the tests run at all, or did the output format change?"
+          exit 1
+        fi
+        skipped="$(printf '%s\n' "$counts" | awk '{s+=$1} END {print s+0}')"
+        if [ "$skipped" -ne 0 ]; then
+          echo "::error::$skipped test(s) SKIPPED. The OpenAL device lane must execute here — a skip means the real backend was not constructed and the device path went unrun (the #42 hole). A gate that exits 0 over a permanently-skipped device test is the silent no-op this repo has already fixed four times. Investigate; do not delete this assertion."
+          exit 1
+        fi
+        echo "device lane exercised — 0 skipped."

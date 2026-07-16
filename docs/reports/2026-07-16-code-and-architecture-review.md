@@ -678,6 +678,33 @@ already does this, and a second implementation in YAML would be one more thing t
 
 ### 3.12 LOW — Release-lane holes
 
+> **Status: FIXED 2026-07-16** (the first two; the third below).
+>
+> **The skip guard now runs at release too, and §5 raised the stakes.** `release.yml:56` ran a bare
+> `dotnet test` — no driver selection, no skip assertion — so the device lane could quietly skip at
+> the one moment that ships bytes. That was already the vacuous lane `gate.yml` exists to prevent,
+> reappearing in the workflow that publishes; it matters more now that the lane carries *real*
+> assertions about buffer upload, source configuration and the pan mapping's contract with the
+> hardware rather than a type test.
+>
+> **Extracted to `.github/actions/headless-test` rather than pasted into both.** Copying ~40 lines of
+> fail-closed shell into a second workflow is two implementations kept in agreement by hand — and this
+> repo was already bitten there once (the `bc` incident, where the guard silently never fired).
+> Doubling the surface for that class of bug in order to close a gap of the same class would be its
+> own punchline.
+>
+> **`release.yml:122` now restores with `--locked-mode`**, so the graph that is packed and pushed to
+> nuget.org is the graph `verify` validated.
+>
+> **A note on the `LD_LIBRARY_PATH` half.** `gate.yml`'s comment says it was verified on the runner
+> that without it the native goes unresolved and the lane degrades to `RecordOnly`. That is not
+> reproducible here: with no system OpenAL at all, the suite still opens a real device and skips
+> nothing, because .NET resolves the native from the deps.json `runtimeTargets` entry rather than
+> through the OS loader. The export may well be redundant on the runner today. It is kept — it costs
+> nothing, it is what was actually verified when #42 landed, and the *assertion*, not the export, is
+> the part that has to be right.
+
+
 - **`release.yml:56`** runs `dotnet test` with **no** `LD_LIBRARY_PATH`, **no** `ALSOFT_DRIVERS`, and
   **no** skip guard. The release verify lane is exactly the vacuous lane `gate.yml` exists to
   prevent — the device test silently skips at the one moment that ships bytes.
@@ -866,7 +893,7 @@ The existing `Engine.step` fuzz result (§2) shows the approach works: `step` is
 | 8 | ~~Add `THIRD-PARTY-NOTICES.md`, pack into Host/Elmish, fix `README.md:13` dep table.~~ **DONE 2026-07-16** (§3.9) — and into **Engine** too, which the finding missed. Gated both directions. Wording still wants a human/legal read. | MED (legal) | ~~~1 h~~ |
 | 9 | ~~Document the single-thread contract on `Engine.T`, `IAudioBackend`, `Cmd.ofEngine`.~~ **DONE 2026-07-16** (§3.8) — plus the context-stealing bug the finding mentioned in passing, which was real and is now fixed rather than documented. | MED | ~~~30 min~~ |
 | 10 | Reconsider `crossFade`'s `EndG = 1.0` overriding the target bus's volume. | MED (design) | discuss |
-| 11 | Give `release.yml:56` gate.yml's device env + skip guard; add `--locked-mode` at `release.yml:122`. | LOW | ~20 min |
+| 11 | ~~Give `release.yml:56` gate.yml's device env + skip guard; add `--locked-mode` at `release.yml:122`.~~ **DONE 2026-07-16** (§3.12) — extracted to a shared composite action rather than duplicated. | LOW | ~~~20 min~~ |
 | 12 | Fix `README.md:48-50`, `gate.yml:145-148`, `Host.fs:66-67` — all three describe behavior that isn't. | LOW | ~20 min |
 | 13 | ~~Add `diff -r docs/api-surface src` to `gate.yml`~~ **WITHDRAWN — that finding was wrong** (§3.10): `EngineTests.fs:360` already gates it. Elmish was the one package it missed; **added 2026-07-16**. Set or delete `ContinuousIntegrationBuild` — still open. | LOW | ~5 min |
 | 14 | Add the three FsCheck property tests from §5; replace `EngineTests.fs:180`. | — | ~2 h |
