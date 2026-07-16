@@ -5,7 +5,7 @@ A product's `update` returns ordinary `Elmish.Cmd` values; the Elmish runtime ex
 playing the underlying `FS.GG.Audio.Core` effects.
 
 The commands dispatch no message — audio is fire-and-forget — so `update` stays a pure
-`Model -> Model * Cmd<'msg>`. Depends on [Elmish](https://elmish.github.io/) (MIT); never on
+`Model -> Model * Cmd<'msg>`. Depends on [Elmish](https://elmish.github.io/) (Apache-2.0); never on
 `FS.GG.UI`.
 
 ## Two paths: raw backend vs. the Engine

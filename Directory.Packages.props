@@ -14,8 +14,12 @@
          (LGPL) ships via the .Soft.Native runtime package, dynamically linked + replaceable. -->
     <PackageVersion Include="Silk.NET.OpenAL" Version="2.23.0" />
     <PackageVersion Include="Silk.NET.OpenAL.Soft.Native" Version="1.23.1" />
-    <!-- FS.GG.Audio.Elmish: the standard MIT Elmish library for the Cmd authoring surface.
-         (Not FS.GG.UI — the audio component stays render-independent.) -->
+    <!-- FS.GG.Audio.Elmish: the standard Elmish library for the Cmd authoring surface.
+         (Not FS.GG.UI — the audio component stays render-independent.)
+         Apache-2.0, NOT MIT — this said "the standard MIT Elmish library" until 2026-07-16, and
+         src/FS.GG.Audio.Elmish/README.md repeated it on nuget.org. Still permissive, so design-doc
+         P5 holds and nothing about the decision changes; the stated fact was just false. Apache-2.0
+         adds a patent grant and an attribution requirement over MIT — see THIRD-PARTY-NOTICES.md. -->
     <PackageVersion Include="Elmish" Version="5.0.2" />
     <!-- Test-only. FsCheck 3.x to match the ported suite's API (Config.QuickThrowOnFailure.WithMaxTest
          / Check.One) — the same line the donor Canvas.Tests used. -->
