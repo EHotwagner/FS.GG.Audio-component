@@ -24,20 +24,28 @@
     <!-- Test-only. FsCheck 3.x to match the ported suite's API (Config.QuickThrowOnFailure.WithMaxTest
          / Check.One) — the same line the donor Canvas.Tests used.
 
-         EXPECTO AND THE ADAPTER ARE PINNED AS A PAIR, and neither can move on its own. Checked
-         2026-07-16 against nuget.org, because "there is a newer one" is true of both and misleading
-         about both:
+         EXPECTO AND THE ADAPTER MOVE AS A PAIR, and the pair is the whole story. The adapter's
+         published order is 0.15.5, 0.15.6, 0.16.0, 1.0.0, and its Expecto constraint does NOT rise
+         with the number:
 
-           YoloDev.Expecto.TestSdk 0.15.6 (here) -> Expecto [10.2.2, 11.0.0)
-           YoloDev.Expecto.TestSdk 1.0.0  (newer) -> Expecto [9.0.0,  10.0.0)
+           YoloDev.Expecto.TestSdk 0.15.6 -> Expecto [10.2.2, 11.0.0)   caps below 11
+           YoloDev.Expecto.TestSdk 0.16.0 -> Expecto 10.2.3             NO upper bound  <- here
+           YoloDev.Expecto.TestSdk 1.0.0  -> Expecto [9.0.0,  10.0.0)   caps below 10
 
-         So 1.0.0 is a HIGHER NUMBER ON AN OLDER LINEAGE: taking it would drag Expecto BACK to 9.x.
-         And Expecto 11.1.0 is unusable at any adapter version — 0.15.6 caps below 11, and 1.0.0 caps
-         below 10 — so Expecto stays on 10.2.3 until an adapter ships that admits 11. NU1608 catches
-         both mistakes at restore (Warning-As-Error), which is why this is a note and not a scar. -->
-    <PackageVersion Include="Expecto" Version="10.2.3" />
+         So the LATEST adapter is a trap: 1.0.0 is a higher number on an older lineage, and taking it
+         would drag Expecto back to 9.x. The one that admits Expecto 11 is 0.16.0, in the middle —
+         which is why "check the newest" is not the same as "check". An earlier pass here concluded
+         "Expecto 11 is unusable at any adapter version" precisely by reading only 0.15.6 and 1.0.0.
+
+         0.16.0 runs on Microsoft.Testing.Platform (via VSTestBridge) rather than VSTest, so this pair
+         is a runner change and not a version bump. `dotnet test` is unaffected — the bridge keeps the
+         old entry point and the old summary format, which gate.yml's skip assertion parses.
+
+         NU1608 (Warning-As-Error) catches a mismatched pair at restore, which is why a wrong guess
+         here is loud rather than subtle. -->
+    <PackageVersion Include="Expecto" Version="11.1.0" />
     <PackageVersion Include="FsCheck" Version="3.3.3" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
-    <PackageVersion Include="YoloDev.Expecto.TestSdk" Version="0.15.6" />
+    <PackageVersion Include="YoloDev.Expecto.TestSdk" Version="0.16.0" />
   </ItemGroup>
 </Project>
