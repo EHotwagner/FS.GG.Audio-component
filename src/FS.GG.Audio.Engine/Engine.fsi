@@ -108,7 +108,9 @@ module Engine =
     /// Install an equal-power cross-fade over `seconds` (DEC-003): `fromBus` ramps from its current
     /// gain down to 0 and `toBus` ramps from 0 up to unity, at constant summed power.
     ///
-    /// `seconds` is treated exactly as `fadeBus` treats it, including the non-finite cases.
+    /// `seconds` is treated exactly as `fadeBus` treats it, including the non-finite cases — but note
+    /// what an infinite one means here: `toBus` holds at the START of its ramp, which is `0` (silent),
+    /// not at whatever gain it had before. `fromBus` holds at its current gain, as `fadeBus` does.
     ///
     /// Note `toBus` ramps to UNITY, not to whatever gain it was configured with — so a cross-fade
     /// onto a bus the player had turned down will put it back to full and leave it there. That is
