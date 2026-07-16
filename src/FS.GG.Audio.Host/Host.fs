@@ -68,6 +68,12 @@ module Wav =
     [<Literal>]
     let private FormatExtensible = 0xFFFE
 
+    // The fmt chunk size an EXTENSIBLE header must have to actually carry the subformat it promises:
+    // 18 bytes of WAVEFORMATEX + cbSize(22) = 40. Anything shorter declares EXTENSIBLE and supplies
+    // no subformat, so there is nothing at offset 24 of the chunk to read.
+    [<Literal>]
+    let private FormatExtensibleSize = 40
+
     type PcmData =
         { FormatTag: int
           Channels: int
@@ -134,11 +140,21 @@ module Wav =
                             // (any multichannel export, and plenty of stereo ones), those files play
                             // correctly today, and refusing them would turn working audio silent —
                             // trading this bug for a worse one.
+                            //
+                            // `sz >= FormatExtensibleSize` is the load-bearing half of the guard, and
+                            // a bounds check against `bytes.Length` alone is NOT a substitute for it.
+                            // The subformat lives at offset 24 of the FMT CHUNK; a file that declares
+                            // EXTENSIBLE with a short (16-byte) fmt chunk has no subformat at all, and
+                            // body+24 then points into whatever chunk happens to follow — the data
+                            // chunk. Reading that as the codec is reading audio samples as a format
+                            // tag, and samples that happen to begin `01 00 00 00` would be read as
+                            // "PCM" and uploaded as PCM: this bug's own fix handing the bug back.
                             formatTag <-
                                 if tag <> FormatExtensible then tag
-                                elif body + 28 <= bytes.Length then BitConverter.ToInt32(bytes, body + 24)
-                                // Truncated before the subformat: we cannot confirm PCM, and assuming
-                                // it is the assumption this whole change exists to remove.
+                                elif sz >= FormatExtensibleSize && body + 28 <= bytes.Length then
+                                    BitConverter.ToInt32(bytes, body + 24)
+                                // No subformat to read, so the codec is genuinely unknown — and
+                                // assuming PCM is the assumption this whole change exists to remove.
                                 else FormatExtensible
                         elif id = "data" then
                             dataOff <- body

@@ -374,6 +374,43 @@ let tests =
             | None -> failtest "expected an extensible PCM WAV to parse — it is valid, playable audio"
         }
 
+        test "Wav.tryParse will not read a subformat the fmt chunk never carried (FR-005)" {
+            // A file declaring EXTENSIBLE with a SHORT (16-byte) fmt chunk supplies no subformat GUID.
+            // Offset 24 of that chunk is not a GUID — it is whatever chunk follows, i.e. the audio
+            // samples. Bounds-checking the read against the FILE length is not enough: it is in
+            // bounds and still meaningless. Here the data is crafted to begin `01 00 00 00`, so a
+            // reader that trusts the file length alone finds "PCM" in the sample data, uploads these
+            // bytes as PCM, and hands back the exact noise bug the codec check exists to prevent.
+            let shortExtensible () =
+                use ms = new System.IO.MemoryStream()
+                use w = new System.IO.BinaryWriter(ms)
+                let data = Array.append (System.BitConverter.GetBytes 1) (Array.zeroCreate 28)
+                w.Write(System.Text.Encoding.ASCII.GetBytes "RIFF")
+                w.Write(36 + data.Length)
+                w.Write(System.Text.Encoding.ASCII.GetBytes "WAVE")
+                w.Write(System.Text.Encoding.ASCII.GetBytes "fmt ")
+                w.Write(16) // a 16-byte fmt chunk: no cbSize, no subformat
+                w.Write(0xFFFEs) // ... yet it claims EXTENSIBLE
+                w.Write(1s)
+                w.Write(44100)
+                w.Write(88200)
+                w.Write(2s)
+                w.Write(16s)
+                w.Write(System.Text.Encoding.ASCII.GetBytes "data")
+                w.Write(data.Length)
+                w.Write(data)
+                w.Flush()
+                ms.ToArray()
+            match Wav.tryParse (shortExtensible ()) with
+            | Some pcm ->
+                Expect.notEqual
+                    pcm.FormatTag
+                    Wav.FormatPcm
+                    "a subformat that was never carried must not be read out of the sample data as PCM"
+                Expect.equal pcm.FormatTag 0xFFFE "the codec is unknown, and says so, rather than guessing"
+            | None -> () // rejecting it outright is also a correct answer
+        }
+
         test "AssetDiagnostics names the codec and the fix, and does not misreport it as a bit depth (#28)" {
             let msg =
                 AssetDiagnostics.message
