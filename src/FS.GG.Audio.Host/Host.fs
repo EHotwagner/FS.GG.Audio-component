@@ -597,17 +597,67 @@ module NullBackend =
 
     [<Sealed>]
     type T(silence: Silence) =
-        let mutable evidence = CoreAudio.emptyEvidence
+        // A ResizeArray, NOT an AudioEvidence folded through `CoreAudio.record`. `record` appends to
+        // the TAIL of an F# list, so it copies everything already recorded on every call. Core's own
+        // comment justifies that — "Requested is a small per-frame batch, so the O(n) append is not a
+        // hot path" — and it is right about `interpret`, and wrong about THIS caller: a NullBackend is
+        // not a batch. It accumulates for the life of the process, so `n` is every effect ever played
+        // and the fold is quadratic in it.
+        //
+        // Measured, one sfx per frame at 60fps: the same 20k plays cost 1.7s at the start of a session
+        // and 16.9s once 120k frames (~33 min) are behind it — a 10x slowdown, still climbing, ~2.4
+        // BILLION cons cells across the run. The cost is CPU, not heap; the retained list is only a
+        // few MB, so this does not look like anything in a memory profile.
+        //
+        // And it lands on the FR-004 degrade path. This is the default backend, and the one
+        // `OpenAlBackend.create` substitutes when no device opens — so the player it punishes is
+        // exactly the one FR-004 exists to protect: no sound card, promised a graceful degrade to
+        // silence, handed a game that gets slower the longer it is played.
+        let recorded = ResizeArray<AudioEffect>()
+        // The lock is here to REPAY what the ResizeArray costs, not to gold-plate. The field this
+        // replaced was a `mutable` holding an IMMUTABLE value, so a reader racing a `Play` saw either
+        // the old snapshot or the new one and could not tear — a property callers had for free. A
+        // ResizeArray has no such property: `List.ofSeq` over one throws "Collection was modified" if
+        // a `Play` lands mid-enumeration (observed, not theorised). Swapping the container without
+        // this would have quietly NARROWED that guarantee, and thrown out of a component whose whole
+        // doctrine is that it does not throw into game code.
+        //
+        // Nothing else in this repo is thread-safe and this member does not pretend the type as a
+        // whole now is (a `Play`/`Play` race still interleaves as it always did). It restores the one
+        // property that used to hold, at ~20ns uncontended against a call a game makes a handful of
+        // times a frame.
+        let gate = obj ()
         // The default is `Requested`: `create ()` is the product/test/CI backend asking for record-only
         // on purpose. Only `OpenAlBackend.create` builds one with `DeviceUnavailable`, and it is the
         // only caller that should — a substitution nobody asked for is the whole of #34.
         new() = new T(Silence.Requested)
         member _.Silence = silence
-        member _.Evidence = evidence
+
+        // Materialized on read rather than maintained on write: a game that never asks pays nothing,
+        // and the caller that does ask is a test asserting once.
+        member _.Evidence = lock gate (fun () -> { Requested = List.ofSeq recorded })
+
+        // Drop everything recorded so far. Retaining every effect for the life of the instance is what
+        // makes this thing evidence, and it is also unbounded — so anything long-lived that holds one
+        // (a soak test; a shipped game that reached it through the FR-004 degrade) needs a way to say
+        // "I have read what I needed" and stop paying for the rest.
+        member _.Clear() = lock gate (fun () -> recorded.Clear())
+
+        member _.RecordedCount = lock gate (fun () -> recorded.Count)
+
         interface IAudioBackend with
             member _.Play(effect: AudioEffect) =
-                // Record-only: identical folding to Core.Audio.interpret, one effect at a time.
-                evidence <- CoreAudio.record effect evidence
+                // Normalize by DELEGATING to Core, not by re-clamping here. This type's contract is an
+                // equality — `Evidence` = `Core.Audio.interpret` of the same batch — and a second
+                // implementation of the clamp is a second thing to keep in agreement by hand.
+                // `interpret` of a one-effect batch IS that effect, normalized, and `normalize` is
+                // per-element and stateless, so appending them one at a time and interpreting them all
+                // at once agree by construction rather than by luck.
+                //
+                // Interpreted OUTSIDE the lock: it is pure, so it has no business in the critical
+                // section, which stays a single append.
+                let normalized = (CoreAudio.interpret [ effect ]).Requested
+                lock gate (fun () -> recorded.AddRange normalized)
             member _.Dispose() = ()
 
     let create () = new T()

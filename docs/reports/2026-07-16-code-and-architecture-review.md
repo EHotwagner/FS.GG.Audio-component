@@ -205,6 +205,25 @@ rather than `None`.)*
 
 ### 3.3 HIGH — `NullBackend` grows unboundedly and degrades quadratically
 
+> **Status: the quadratic is FIXED 2026-07-16; the unbounded retention is now opt-out, not gone.**
+> `NullBackend` accumulates in a `ResizeArray` and delegates normalization to `Core.Audio.interpret`,
+> so the documented `Evidence` = `interpret` equality holds by construction rather than by a
+> second hand-maintained clamp. Re-running this section's own reproduction: the per-batch cost is now
+> **flat (3/4/3/4/5/1 ms) where it was 1711 → 16881 ms**. `Core.Audio.record`'s misleading comment is
+> corrected in place.
+>
+> **Not fixed: the retention itself.** The effects are still held for the life of the instance, so the
+> heap still grows (~5 MB / 33 min). A new `NullBackend.Clear()` lets a long-lived holder bound it,
+> and the `.fsi` now documents the retention as a known property — but a game that reached this
+> backend through the FR-004 degrade never calls `Clear`, so **that path still accumulates.** Fixing
+> it properly means deciding whether a *substituted* Null should record at all (see §4c) — that
+> changes the observable semantics of a public member, so it is the owner's call, not a reviewer's.
+>
+> Guarded by an **allocation-ratio** test, not a timing one: allocation is what a tail-append actually
+> wastes, it is byte-deterministic across runs (0.911 every time, where the timing equivalent swung
+> to 1.88 on noise), and it needs no large batch — so a regression fails in 5 s instead of 4 m 28 s.
+> Verified by mutation: restoring the tail-append fails it at 7.66x against a 2.0 threshold.
+
 **`src/FS.GG.Audio.Core/Audio.fs:79-80`, `src/FS.GG.Audio.Host/Host.fs:494-498`**
 
 `Audio.record` appends to the tail of an F# list:
@@ -644,7 +663,7 @@ The existing `Engine.step` fuzz result (§2) shows the approach works: `step` is
 |---|---|---|---|
 | 1 | ~~Guard the `Wav.tryParse` chunk walk (`sz <= 0` → stop). Add adversarial WAV tests.~~ **DONE 2026-07-16** — see §3.1. | HIGH | ~~~30 min~~ |
 | 2 | ~~Validate `wFormatTag` at `body+0`; reject non-PCM via the existing `UnsupportedFormat` leg.~~ **DONE 2026-07-16** — but *not* as recommended: `UnsupportedFormat` would have lied, and a blunt tag check would have silenced valid `WAVE_FORMAT_EXTENSIBLE` PCM. See §3.2. | HIGH | ~~~30 min~~ |
-| 3 | Make `NullBackend` accumulate in a `ResizeArray`; add a bound or reset. | HIGH | ~1 h |
+| 3 | ~~Make `NullBackend` accumulate in a `ResizeArray`; add a bound or reset.~~ **PARTLY DONE 2026-07-16** — quadratic gone, `Clear()` added. Retention on the FR-004 degrade path remains and needs an owner decision (§3.3, §4c). | HIGH | ~~~1 h~~ |
 | 4 | Check `al.GetError()` inside `guarded`; query `ALC_MONO_SOURCES` instead of hard-coding 240. | HIGH | ~2 h |
 | 5 | **Fill the device lane the gate already built** — one test, real resolver + `sampleWav()`, driving `Play`/`PlayAt`/`PlayMusic`/`SetBusGain`/`Dispose`, gated on `Backend.isDeviceBacked`. | HIGH | ~2 h |
 | 6 | Fix the pan law to `dx / distance`. Add an off-axis-but-ahead test. | MED-HIGH | ~1 h |
