@@ -707,7 +707,7 @@ let tests =
         // with `InvalidValue` and no exception. That is a reachable, product-supplied path, not a
         // synthetic poke.
         testSequenced (
-            test "a device that reports an error code is named, not silently counted as a success (#33)" {
+            test "a WAV the device refuses names the ASSET, and is not cached (#28, report §3.4)" {
                 let rateZeroWav =
                     use ms = new System.IO.MemoryStream()
                     use w = new System.IO.BinaryWriter(ms)
@@ -747,14 +747,17 @@ let tests =
                         let text = captured.ToString()
                         // Before the GetError check this text was EMPTY: the call "succeeded", the
                         // fault run was ended, and the failure left no trace on any channel.
-                        Expect.stringContains
-                            text
-                            "the audio device failed on"
-                            "a device that reported an error code must be named, not counted as a success"
-                        Expect.stringContains text "IAudioBackend.Play" "the failing operation is named"
-                        // The driver's own account of what was wrong with the call — the only account
-                        // anyone gets, and the whole reason the code is carried rather than discarded.
-                        Expect.stringContains text "InvalidValue" "the device's own error code survives into the line"
+                        // NAMES THE ASSET, not the operation. This used to report "the audio device
+                        // failed on IAudioBackend.Play" — true, and the wrong end of the telescope:
+                        // it named the call and not the file, and left the broken buffer cached so
+                        // every later play was silent without even repeating the complaint. Now the
+                        // upload result is checked, so the id is named and nothing is cached (#128).
+                        Expect.stringContains text "rate-zero" "the diagnostic names the product's own id"
+                        Expect.stringContains text "InvalidValue" "the device's own account of the refusal survives"
+                        Expect.stringContains text "sample rate of 0" "and it names the likely cause"
+                        Expect.isFalse
+                            (text.Contains "the audio device failed on")
+                            "a broken ASSET must not be reported as a device fault — the device is fine"
                     | kind ->
                         skiptest (
                             sprintf
@@ -954,6 +957,47 @@ let tests =
                 | kind ->
                     backend.Dispose()
                     skiptest (sprintf "no OpenAL device (%A) — there is no device path to run." kind)
+            })
+
+        // #116's leg needed a new subject. It used to be provoked with a 0 Hz WAV — but that is an
+        // ASSET fault, and #128 now intercepts it upstream and names the id instead, which is the
+        // better answer and leaves this leg with nothing to trigger it.
+        //
+        // `SetListener` is the honest replacement: it takes a raw position, clamps nothing (the
+        // Engine does not clamp it either), and a nan reaches the driver, which refuses it. Unlike
+        // the WAV case there is no asset to blame — the caller handed the DEVICE something it will
+        // not take, so "the audio device failed on IMixingBackend.SetListener" is exactly the right
+        // account, under exactly the right operation.
+        testSequenced (
+            test "an AL error code is reported as a device fault, not counted as a success (#33)" {
+                let resolver =
+                    { ResolveSound = (fun _ -> Some(sampleWav ()))
+                      ResolveTrack = (fun _ -> None) }
+                let backend = OpenAlBackend.create resolver
+                try
+                    match Backend.kindOf backend with
+                    | BackendKind.DeviceBacked ->
+                        let mixing = backend :?> IMixingBackend
+                        let original = System.Console.Error
+                        use captured = new System.IO.StringWriter()
+                        System.Console.SetError captured
+                        try
+                            mixing.SetListener(nan, 0.0, 0.0)
+                        finally
+                            System.Console.SetError original
+                        let text = captured.ToString()
+                        // Before #116 this was EMPTY: OpenAL set the code, threw nothing, `action`
+                        // returned true, and `guarded` called Succeeded — recording the device as
+                        // healthy on a call it had just refused.
+                        Expect.stringContains
+                            text
+                            "the audio device failed on"
+                            "an error code the device reported must be named, not counted as a success"
+                        Expect.stringContains text "IMixingBackend.SetListener" "under the operation that actually failed"
+                        Expect.stringContains text "InvalidValue" "carrying the driver's own account"
+                    | kind -> skiptest (sprintf "no OpenAL device (%A) — no device to refuse anything." kind)
+                finally
+                    backend.Dispose()
             })
 
         test "DeviceDiagnostics.message names the operation, the degrade, and the way back (#33)" {

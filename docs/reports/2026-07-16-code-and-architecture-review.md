@@ -294,9 +294,26 @@ claim that is false for the module's biggest caller.
 > which `tryParse` passes (it gates on channels/bits, not rate) and OpenAL rejects with
 > `InvalidValue`. Mutation-verified: with the check removed, the captured stderr is **empty**.
 >
-> *Remaining, minor:* `tryParse` still accepts `sampleRate = 0`, so that asset reaches the device and
-> is diagnosed by #33 rather than by the more useful #28 asset diagnostic (which could name the id).
-> It is no longer silent, which was the bug; naming it better is a follow-up.
+> *Remaining, minor:* ~~`tryParse` still accepts `sampleRate = 0`~~ **FIXED 2026-07-16, and it was not
+> minor.** Chasing it found the real defect one line over: **`uploadBuffer` never checked whether
+> `BufferData` succeeded.** It returned `Ok buf` unconditionally, so a refused upload produced a live,
+> EMPTY buffer handle that `BufferCache` then cached against the id **forever** — every later play
+> found the cache warm, fed the device a buffer with no samples, and was silent, without even
+> repeating the complaint.
+>
+> Three inputs reach that path from a WAV `tryParse` accepts, all verified against a real device:
+> `rate = 0` → `InvalidValue`, `rate < 0` → `InvalidValue`, and **data truncated part-way through a
+> sample** → `InvalidValue` (this reader tolerates a short data chunk deliberately; the device does
+> not). The last is the plausible one — a truncated download.
+>
+> Fixed by **asking the device whether it accepted the upload** rather than enumerating validations:
+> the list of inputs a driver refuses is the driver's, not ours, and validating `sampleRate` alone
+> would have left the truncation case and every future one. The buffer is deleted rather than leaked,
+> the failure is not cached (so a later good resolve still works), and the new
+> `AssetDiagnostics.UploadRejected` **names the id** — where #33 named only the operation.
+>
+> Reading the AL error inside `uploadBuffer` clears it, so `guarded` does not *also* report it: a
+> broken asset is not a device fault, and one failure gets one account.
 
 **`src/FS.GG.Audio.Host/Host.fs:504-790`** — verified: **`alGetError` / `GetError` appears nowhere in
 the file.**
