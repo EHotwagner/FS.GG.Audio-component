@@ -268,6 +268,36 @@ let tests =
                 "recording resumes after Clear"
         }
 
+        test "reading NullBackend.Evidence never throws while another thread is playing (report §3.3)" {
+            // Guards a property that was FREE before the ResizeArray and had to be bought back. The
+            // old field was a `mutable` holding an immutable value, so a reader racing a `Play` saw
+            // one snapshot or the other. `List.ofSeq` over a live ResizeArray throws "Collection was
+            // modified" instead — and this component's doctrine is that it does not throw into game
+            // code. Without the lock this fails within milliseconds.
+            let nb = NullBackend.create ()
+            let backend = nb :> IAudioBackend
+            let effect = CoreAudio.playSfx (SoundId "s") 0.5
+            let mutable readerFault: exn = null
+            use stop = new System.Threading.CancellationTokenSource(System.TimeSpan.FromMilliseconds 500.0)
+            let writer =
+                System.Threading.Tasks.Task.Run(fun () ->
+                    while not stop.IsCancellationRequested do
+                        backend.Play effect)
+            let reader =
+                System.Threading.Tasks.Task.Run(fun () ->
+                    while not stop.IsCancellationRequested do
+                        try
+                            nb.Evidence |> ignore
+                        with ex ->
+                            if isNull readerFault then readerFault <- ex)
+            System.Threading.Tasks.Task.WaitAll(writer, reader)
+            if not (isNull readerFault) then
+                failtestf
+                    "reading Evidence while Play ran threw %s: %s — the container change narrowed a guarantee callers already had"
+                    (readerFault.GetType().Name)
+                    readerFault.Message
+        }
+
         test "the Null backend never implements IMixingBackend, so the Engine degrades over it (#11)" {
             let nb = NullBackend.create () :> IAudioBackend
             Expect.isFalse (nb :? IMixingBackend) "the Null fallback stays non-mixing"

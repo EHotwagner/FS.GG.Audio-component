@@ -614,6 +614,19 @@ module NullBackend =
         // exactly the one FR-004 exists to protect: no sound card, promised a graceful degrade to
         // silence, handed a game that gets slower the longer it is played.
         let recorded = ResizeArray<AudioEffect>()
+        // The lock is here to REPAY what the ResizeArray costs, not to gold-plate. The field this
+        // replaced was a `mutable` holding an IMMUTABLE value, so a reader racing a `Play` saw either
+        // the old snapshot or the new one and could not tear — a property callers had for free. A
+        // ResizeArray has no such property: `List.ofSeq` over one throws "Collection was modified" if
+        // a `Play` lands mid-enumeration (observed, not theorised). Swapping the container without
+        // this would have quietly NARROWED that guarantee, and thrown out of a component whose whole
+        // doctrine is that it does not throw into game code.
+        //
+        // Nothing else in this repo is thread-safe and this member does not pretend the type as a
+        // whole now is (a `Play`/`Play` race still interleaves as it always did). It restores the one
+        // property that used to hold, at ~20ns uncontended against a call a game makes a handful of
+        // times a frame.
+        let gate = obj ()
         // The default is `Requested`: `create ()` is the product/test/CI backend asking for record-only
         // on purpose. Only `OpenAlBackend.create` builds one with `DeviceUnavailable`, and it is the
         // only caller that should — a substitution nobody asked for is the whole of #34.
@@ -622,15 +635,15 @@ module NullBackend =
 
         // Materialized on read rather than maintained on write: a game that never asks pays nothing,
         // and the caller that does ask is a test asserting once.
-        member _.Evidence = { Requested = List.ofSeq recorded }
+        member _.Evidence = lock gate (fun () -> { Requested = List.ofSeq recorded })
 
         // Drop everything recorded so far. Retaining every effect for the life of the instance is what
         // makes this thing evidence, and it is also unbounded — so anything long-lived that holds one
         // (a soak test; a shipped game that reached it through the FR-004 degrade) needs a way to say
         // "I have read what I needed" and stop paying for the rest.
-        member _.Clear() = recorded.Clear()
+        member _.Clear() = lock gate (fun () -> recorded.Clear())
 
-        member _.RecordedCount = recorded.Count
+        member _.RecordedCount = lock gate (fun () -> recorded.Count)
 
         interface IAudioBackend with
             member _.Play(effect: AudioEffect) =
@@ -640,7 +653,11 @@ module NullBackend =
                 // `interpret` of a one-effect batch IS that effect, normalized, and `normalize` is
                 // per-element and stateless, so appending them one at a time and interpreting them all
                 // at once agree by construction rather than by luck.
-                recorded.AddRange((CoreAudio.interpret [ effect ]).Requested)
+                //
+                // Interpreted OUTSIDE the lock: it is pure, so it has no business in the critical
+                // section, which stays a single append.
+                let normalized = (CoreAudio.interpret [ effect ]).Requested
+                lock gate (fun () -> recorded.AddRange normalized)
             member _.Dispose() = ()
 
     let create () = new T()
