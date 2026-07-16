@@ -324,6 +324,17 @@ module AssetDiagnostics =
         // cause sends the reader to re-export at a bit depth that was never the problem, which is the
         // failure #28 exists to prevent, one level in.
         | UnsupportedCodec of formatTag: int
+        // The file parsed, the codec and shape are ones we support, and the DEVICE still refused the
+        // samples. Carries the device's own code, because this layer cannot know better than the
+        // driver why the driver said no.
+        //
+        // The other three cases enumerate a defect we can name from the header alone. This one exists
+        // because that enumeration can never be complete: a 0 Hz rate, a negative rate, and a data
+        // chunk truncated mid-sample are all accepted by `tryParse` (it tolerates a short data chunk
+        // deliberately) and all rejected by `BufferData` — and the next such input is one nobody has
+        // hit yet. Asking the device whether it accepted the upload covers all of them, including the
+        // ones not yet discovered, without guessing at the driver's rules.
+        | UploadRejected of reason: string
 
     // The asset that failed, carrying the product's own id — the only handle the host has on it.
     type Asset =
@@ -392,6 +403,15 @@ module AssetDiagnostics =
                 what
                 (codecName tag)
                 tag
+        | UploadRejected reason ->
+            // Names the ASSET, which is the whole point. The device fault latch (#33) would report
+            // this too — as an anonymous "the audio device failed on IAudioBackend.Play", naming the
+            // operation and not the file. For a bad asset that is the wrong end of the telescope: the
+            // reader needs the id, and the id is the one thing this layer has.
+            sprintf
+                "FS.GG.Audio.Host: %s parsed cleanly, and the audio device then REFUSED its samples (%s) — so every play of it is silent. Its header and its data disagree. The usual causes are a sample rate of 0 (or negative), and audio data truncated part-way through a sample: this reader tolerates a short data chunk on purpose, and the device does not. Re-export it as PCM WAV, and check it was not truncated in transit."
+                what
+                reason
 
     // A warn-once-per-id latch over `message`. Device-free (it holds ids and an emit callback, no
     // OpenAL types), which is what lets the failure leg be asserted headless — the backend that
@@ -876,9 +896,35 @@ module private OpenAl =
                 match bufferFormat pcm.Channels pcm.BitsPerSample with
                 | None -> Error(AssetDiagnostics.UnsupportedFormat(pcm.Channels, pcm.BitsPerSample))
                 | Some fmt ->
+                    // ASK THE DEVICE WHETHER IT TOOK THEM. `Ok buf` used to be returned unconditionally
+                    // — `BufferData`'s result was never consulted — and OpenAL does not throw, so a
+                    // refused upload produced a live, EMPTY buffer handle that `BufferCache` then
+                    // cached against the id FOREVER. Every later play of that sound found the cache
+                    // warm, fed the device a buffer with no samples in it, and produced silence. Not
+                    // even a repeat of the complaint: the first fault was reported once by the device
+                    // latch and never again, because nothing after it failed.
+                    //
+                    // Three inputs reach here and are refused, all from a WAV `tryParse` accepts: a
+                    // 0 Hz rate, a negative rate, and data truncated part-way through a sample (this
+                    // reader tolerates a short data chunk deliberately; the device does not). The
+                    // point of checking the RESULT rather than validating those three is that the
+                    // list is not knowable from here — it is the driver's, not ours.
+                    al.GetError() |> ignore
                     let buf = al.GenBuffer()
                     al.BufferData(buf, fmt, pcm.Data, pcm.SampleRate)
-                    Ok buf
+                    match al.GetError() with
+                    | AudioError.NoError -> Ok buf
+                    | code ->
+                        // Delete the handle we just made: it holds nothing, and keeping it leaks a
+                        // buffer per rejected play of an id that is never cached and so retries every
+                        // time.
+                        al.DeleteBuffer buf
+                        // Reading the error above CLEARED it, deliberately. `guarded` checks the flag
+                        // after this returns, and would otherwise ALSO report it — as an anonymous
+                        // "the audio device failed on IAudioBackend.Play". This is not a device fault:
+                        // the device is fine and the asset is broken, and the diagnostic that names
+                        // the id is the one worth having (#28). One failure, one account of it.
+                        Error(AssetDiagnostics.UploadRejected(string code))
 
         // Resolve -> decode -> upload, reporting whichever step failed. Shared by both caches so a
         // missing track is exactly as loud as a missing sound.

@@ -218,6 +218,17 @@ module AssetDiagnostics =
         /// The one failure in this component whose degrade is not merely silence-instead-of-sound:
         /// before it was checked, these bytes were uploaded AS PCM and played as noise.
         | UnsupportedCodec of formatTag: int
+        /// The file parsed, its codec and shape are supported, and the DEVICE still refused the
+        /// samples. Carries the driver's own error code — this layer cannot know better than the
+        /// driver why the driver said no.
+        ///
+        /// The cases above each name a defect readable from the header. This one exists because that
+        /// list can never be complete: a `0`/negative sample rate, and a data chunk truncated
+        /// part-way through a sample, are all accepted by `Wav.tryParse` (it tolerates a short data
+        /// chunk on purpose) and all refused by the device — and the next such input is one nobody
+        /// has hit. Asking whether the upload was accepted covers them all, including the ones not
+        /// yet found.
+        | UploadRejected of reason: string
 
     /// The asset that failed, carrying the product's own id — the only handle the host has on it.
     type Asset =
