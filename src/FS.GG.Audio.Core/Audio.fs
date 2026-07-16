@@ -76,6 +76,13 @@ module Audio =
 
     // Append to the tail so Requested stays oldest-first without a reverse per call. Requested is a
     // small per-frame batch, so the O(n) append is not a hot path.
+    //
+    // That last sentence is a claim about the CALLER, not about this function, and it is only true of
+    // callers that actually pass a batch. Fold `record` over a long-lived accumulator instead and it
+    // is quadratic in everything accumulated so far — which is exactly what FS.GG.Audio.Host's
+    // NullBackend did, at a measured 10x slowdown after ~33 minutes of play (review 2026-07-16 §3.3).
+    // It now accumulates in a ResizeArray and calls `interpret` per effect for the normalization.
+    // Anything that records for longer than a frame should do the same rather than fold this.
     let record (effect: AudioEffect) (evidence: AudioEvidence) : AudioEvidence =
         { evidence with Requested = evidence.Requested @ [ normalize effect ] }
 

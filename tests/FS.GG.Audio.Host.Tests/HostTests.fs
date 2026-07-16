@@ -198,6 +198,76 @@ let tests =
         // IMixingBackend, so if Null implemented it the Engine would push realized gains at a recorder
         // instead of taking its non-positional degrade path. Headless-safe — no device required — so
         // unlike the #11 device test below, this one ALWAYS has a subject and always asserts.
+        // `Audio.record` appends to the tail of an F# list. Core's comment justifies the O(n) —
+        // "Requested is a small per-frame batch" — and is right about `interpret` and wrong about this
+        // caller: a NullBackend accumulates for the life of the process, so the fold was quadratic in
+        // every effect ever played. Measured at 10x slower after 33 min of one-sfx-per-frame, and it
+        // lands on the FR-004 degrade path, where the player was promised silence and got a slow
+        // puncture instead.
+        //
+        // Measured in ALLOCATED BYTES, not wall-clock, and that is the point of the test rather than a
+        // detail of it. Allocation is precisely what a tail-append wastes — it copies the whole spine
+        // per call — so it measures the defect directly instead of measuring a machine. It is also
+        // deterministic: this ratio is byte-identical across runs, where the equivalent timing
+        // assertion swings with GC pauses and CI load, and would either flake or need a threshold so
+        // loose it stops catching anything. It needs no large batch for resolution either, so a
+        // regression fails in seconds rather than minutes.
+        //
+        // The shape of the assertion is a RATIO: cost per play must not depend on how much has already
+        // been recorded. That is the actual invariant — O(1) amortized append — and it holds on any
+        // machine, however fast or loaded.
+        test "NullBackend records in constant cost per play, whatever it already holds (report §3.3)" {
+            let nb = NullBackend.create ()
+            let backend = nb :> IAudioBackend
+            let effect = CoreAudio.playSfx (SoundId "step") 0.5
+            let batchAlloc n =
+                let before = System.GC.GetAllocatedBytesForCurrentThread()
+                for _ in 1..n do backend.Play effect
+                System.GC.GetAllocatedBytesForCurrentThread() - before
+            let n = 2_000
+            batchAlloc n |> ignore // warm: the first batch carries JIT
+            let early = batchAlloc n // recorder holds ~2k
+            for _ in 1..9 do batchAlloc n |> ignore // bury it under 18k more
+            let late = batchAlloc n // recorder holds ~22k: 10x the history, same work
+            Expect.equal nb.RecordedCount (n * 12) "every play is recorded"
+            // Linear: ~0.91 (steady state allocates slightly less than the early growth spurts).
+            // Quadratic: ~10, tracking the 10x history. 2.0 sits far from both.
+            let ratio = float late / float (max early 1L)
+            Expect.isLessThan
+                ratio
+                2.0
+                (sprintf
+                    "cost per play must not grow with what is already recorded: %d plays allocated %dB early and %dB after 10x the history (%.2fx). A ratio that tracks history is the quadratic tail-append."
+                    n early late ratio)
+        }
+
+        test "NullBackend.Evidence still equals Core.Audio.interpret, and Clear bounds it (report §3.3)" {
+            // The ResizeArray is an implementation detail; this equality is the contract, and it is
+            // what stops the accumulator from drifting into a second, hand-maintained clamp.
+            let nb = NullBackend.create ()
+            let backend = nb :> IAudioBackend
+            // Deliberately out-of-range volumes: the normalization is the part most easily lost by
+            // hand-rolling the append, and it is invisible unless the input needs clamping.
+            let effects =
+                [ CoreAudio.playSfx (SoundId "a") 5.0
+                  PlaySfx(SoundId "raw", 2.5) // straight at the DU, past the smart constructor
+                  CoreAudio.playMusic (TrackId "t") true
+                  SetBusVolume(Sfx, -3.0)
+                  Duck(Music, 9.0, -1.0)
+                  CoreAudio.stopMusic ]
+            for e in effects do backend.Play e
+            Expect.equal nb.Evidence (CoreAudio.interpret effects) "Evidence == interpret of the same batch"
+            Expect.equal nb.RecordedCount 6 "RecordedCount agrees with what was played"
+            nb.Clear()
+            Expect.equal nb.Evidence CoreAudio.emptyEvidence "Clear drops the history"
+            Expect.equal nb.RecordedCount 0 "Clear resets the count"
+            backend.Play(CoreAudio.playSfx (SoundId "after") 1.0)
+            Expect.equal
+                nb.Evidence
+                (CoreAudio.interpret [ CoreAudio.playSfx (SoundId "after") 1.0 ])
+                "recording resumes after Clear"
+        }
+
         test "the Null backend never implements IMixingBackend, so the Engine degrades over it (#11)" {
             let nb = NullBackend.create () :> IAudioBackend
             Expect.isFalse (nb :? IMixingBackend) "the Null fallback stays non-mixing"

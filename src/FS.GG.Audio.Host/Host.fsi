@@ -382,11 +382,26 @@ module NullBackend =
     type T =
         interface IAudioBackend
         /// Accumulated evidence — equal to `FS.GG.Audio.Core.Audio.interpret` of the same batch.
+        ///
+        /// Every effect played through this backend is retained until `Clear`, for the life of the
+        /// instance. That is deliberate — the retained requests ARE the evidence a headless test
+        /// asserts on — but it is also UNBOUNDED, and worth knowing about for anything long-lived:
+        /// a soak test, or a shipped game that reached this backend through the `OpenAlBackend.create`
+        /// degrade (FR-004) and will never read `Evidence` at all. Such a caller should `Clear`
+        /// periodically, or hold a backend of its own that records nothing.
+        ///
+        /// Materialized on each read, so read it once and bind it rather than re-reading it in a loop.
         member Evidence: AudioEvidence
+        /// Effects recorded since construction or the last `Clear`. `Evidence.Requested.Length`
+        /// without materializing the list.
+        member RecordedCount: int
         /// Why this backend is silent (#34): `Requested` when the product built it on purpose,
         /// `DeviceUnavailable` when `OpenAlBackend.create` substituted it. Prefer `Backend.kindOf`,
         /// which answers the same question for ANY `IAudioBackend` without a type test.
         member Silence: Silence
+        /// Drop everything recorded so far, so a long-lived holder can bound what is otherwise kept
+        /// for the life of the instance. `Evidence` is then empty until the next `Play`.
+        member Clear: unit -> unit
 
     /// Create a fresh Null backend. Its `Silence` is `Requested` — this is the deliberate,
     /// record-only backend, never a substitution.
