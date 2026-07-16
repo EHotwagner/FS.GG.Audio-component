@@ -22,9 +22,9 @@ Restoring any of the bottom three puts an OpenAL Soft shared library into your b
 - **Delivered by:** [`Silk.NET.OpenAL.Soft.Native`](https://www.nuget.org/packages/Silk.NET.OpenAL.Soft.Native)
   (pinned in `Directory.Packages.props`), which declares `LGPL-2.0-or-later` and
   `requireLicenseAcceptance = true`.
-- **What it is:** prebuilt [OpenAL Soft](https://openal-soft.org/) binaries — `libopenal.so`
-  (linux-x64, linux-arm, linux-arm64), `libopenal.dylib` (osx-x64, osx-arm64), and `soft_oal.dll`
-  (win-x64, win-x86).
+- **What it is:** prebuilt [OpenAL Soft](https://openal-soft.org/) binaries for eight runtime
+  identifiers — `libopenal.so` (linux-x64, linux-arm, linux-arm64), `libopenal.dylib` (osx-x64,
+  osx-arm64), and `soft_oal.dll` (win-x64, win-x86, win-arm64).
 - **Upstream:** <https://github.com/kcat/openal-soft> · **Licence text:**
   <https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html>
 
@@ -61,10 +61,13 @@ OpenAL. The `IAudioBackend` seam exists so the component is never captive to one
 The managed bindings and the native library are separate packages with separate licences; only the
 native one is LGPL.
 
-## Elmish — MIT
+## Elmish — Apache-2.0
 
-- [`Elmish`](https://www.nuget.org/packages/Elmish), used by `FS.GG.Audio.Elmish` for its `Cmd`
-  authoring surface. MIT. Upstream: <https://github.com/elmish/elmish>.
+- [`Elmish`](https://www.nuget.org/packages/Elmish) 5.x, used by `FS.GG.Audio.Elmish` for its `Cmd`
+  authoring surface. **Apache-2.0**, not MIT. Upstream: <https://github.com/elmish/elmish>.
+  Permissive, and it carries a patent grant and an attribution requirement that MIT does not; it is
+  managed code with no native component. This repo described it as MIT in several places until
+  2026-07-16 — that was simply wrong, and the packages are unaffected beyond the correction.
 
 ## FSharp.Core — MIT
 

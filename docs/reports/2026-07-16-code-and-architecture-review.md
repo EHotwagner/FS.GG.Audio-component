@@ -526,6 +526,20 @@ needs them.
 > The content reflects the project's own recorded reasoning (DEC-001, `work/002-audio-host/charter.md`)
 > rather than inventing a rationale. It states facts and mechanism, and explicitly says it is not legal
 > advice — **a human should still review the wording before the next publish.**
+>
+> **A NEW finding surfaced while fact-checking the notice — Elmish is Apache-2.0, not MIT.** This
+> review never checked it. The repo asserted MIT in four places, including
+> `src/FS.GG.Audio.Elmish/README.md`, which **nuget.org renders** — a published licence misstatement,
+> the same family as §3.9 and arguably more embarrassing, since nothing forced the claim. Apache-2.0
+> is permissive, so design-doc P5 and the shipping decision are unaffected; the *stated fact* was
+> simply false. It adds a patent grant and an attribution requirement MIT does not. Corrected on the
+> live surfaces (notice, Elmish package README, `Directory.Packages.props`); the SDD records in
+> `work/003-audio-elmish/` still say MIT and are left as the historical record they are.
+>
+> *Caught only because the notice was fact-checked line by line against the actual `.nuspec`s — the
+> first draft of this very notice repeated the MIT claim, and also under-counted the native's runtime
+> identifiers (eight, not seven; `win-arm64` was missed). A licence notice that overclaims is its own
+> kind of wrong, and this one nearly shipped doing it.*
 
 
 **`Directory.Packages.props:13-14`, `Directory.Build.props:60`, `src/FS.GG.Audio.Host/README.md`**
