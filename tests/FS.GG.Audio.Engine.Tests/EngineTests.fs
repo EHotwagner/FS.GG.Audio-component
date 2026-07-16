@@ -120,6 +120,51 @@ let tests =
             Expect.floatClose acc (engine.BusGain Music) 1.0 "restored after the attack window"
         }
 
+        // A nan `seconds` failed BOTH comparisons in `seconds <= 0.0`, so it slipped past the
+        // immediate leg, installed a fade with a nan Duration, and that fade could never complete
+        // (`Elapsed >= nan` is false forever) while rendering a nan gain that clamped to 0. The bus
+        // went silent PERMANENTLY, with no diagnostic and no way back except a SetBusVolume that
+        // happened to cancel the fade — the unexplained silence this component exists to abolish.
+        test "a nan fade duration sets the gain at once, it does not silence the bus forever (report §3.6)" {
+            let engine = Engine.create (NullBackend.create () :> IAudioBackend)
+            Engine.fadeBus engine Music 1.0 nan
+            Engine.step engine 0.016 []
+            Expect.floatClose acc (engine.BusGain Music) 1.0 "a nan duration applies the target immediately"
+            for _ in 1..1000 do Engine.step engine 0.016 []
+            Expect.floatClose acc (engine.BusGain Music) 1.0 "and it stays there — no stuck fade rendering a nan gain"
+
+            // The same hole in crossFade, which had the identical structure.
+            let e2 = Engine.create (NullBackend.create () :> IAudioBackend)
+            Engine.crossFade e2 Music Ambient nan
+            for _ in 1..100 do Engine.step e2 0.016 []
+            Expect.floatClose acc (e2.BusGain Music) 0.0 "crossFade with a nan duration completes at once: from -> 0"
+            Expect.floatClose acc (e2.BusGain Ambient) 1.0 "... and to -> unity"
+        }
+
+        test "an infinite fade duration holds the bus, rather than snapping it to the target (report §3.6)" {
+            // The tempting guard is `not (Double.IsFinite seconds) -> immediate`, and it is wrong.
+            // `fadeBus Music 0.0 infinity` is a coherent request — a fade so slow it never arrives —
+            // and treating it as immediate would silence the music INSTANTLY: the precise opposite of
+            // what was asked. nan has no intent to honour; infinity does.
+            let engine = Engine.create (NullBackend.create () :> IAudioBackend)
+            Engine.step engine 0.0 [ CoreAudio.setBusVolume Music 0.8 ]
+            Engine.fadeBus engine Music 0.0 infinity
+            for _ in 1..1000 do Engine.step engine 0.016 []
+            Expect.floatClose acc (engine.BusGain Music) 0.8 "an infinitely slow fade-out never arrives, and never jumps"
+        }
+
+        test "a nan duck duration is inert and does not outlive the process (report §3.6)" {
+            // Bounded to five buses and inert either way, so this was never the bug the fades were —
+            // but it is the same missing guard: a nan Duration can never satisfy `Elapsed >= Duration`,
+            // so `advance` could not retire the entry.
+            let engine = Engine.create (NullBackend.create () :> IAudioBackend)
+            Engine.step engine 0.0 [ Duck(Music, 0.5, nan) ]
+            Engine.step engine 0.016 []
+            Expect.floatClose acc (engine.BusGain Music) 1.0 "a nan duck attenuates nothing"
+            for _ in 1..100 do Engine.step engine 0.016 []
+            Expect.floatClose acc (engine.BusGain Music) 1.0 "and stays inert rather than lingering"
+        }
+
         test "3D: inverse-distance attenuation and x-pan on a mixing backend (FR-005)" {
             let backend = mixing ()
             let engine = Engine.create (backend :> IAudioBackend)

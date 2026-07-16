@@ -410,6 +410,26 @@ distant nearly-ahead source is *near-centre*.
 
 ### 3.6 MEDIUM — `fadeBus` with a NaN duration silences a bus permanently
 
+> **Status: FIXED 2026-07-16.** `fadeBus` and `crossFade` share one `isImmediate` guard
+> (`Double.IsNaN seconds || seconds <= 0.0`); `applyCurve`'s progress clamp is NaN-total as defence in
+> depth. Original reproduction: the bus reported **0.000000 forever before, 1.000000 after**.
+>
+> **This report's recommended guard was wrong, and the mutation proves it.** §3.6 said to treat
+> *non-finite* as immediate (`not (Double.IsFinite seconds) || seconds <= 0.0`). That folds `+infinity`
+> in — and `fadeBus engine Music 0.0 infinity` would then **silence the music instantly**, the precise
+> opposite of the request. `nan` is nonsense with no intent to honour, so the defined floor is right;
+> an infinite duration is a *coherent* request ("a fade so slow it never arrives") and is honoured as
+> one, holding the bus at its current gain. That also matches Core, which normalizes a `nan` duck
+> duration to 0 and lets an infinite one through.
+>
+> Mutation-verified both ways: the old `<= 0` guard fails the NaN test, and the recommended
+> `IsFinite` guard fails the infinity test with `actual=0 expected=0.8` — it silences the music, on
+> the nose.
+>
+> The `Duck` NaN case noted below is fixed with the same guard. The `.fsi` now documents both
+> non-finite legs, which it never did — the undocumented gap is what let the `nan` through.
+
+
 **`src/FS.GG.Audio.Engine/Engine.fs:120-126`**
 
 `nan <= 0.0` is `false`, so a NaN duration installs a fade with `Duration = nan`. Then:
@@ -450,6 +470,13 @@ unaffected and the dictionary is bounded to 5 buses, but it's the same missing g
 `Engine.fs:147`.)*
 
 ### 3.7 MEDIUM (design) — `crossFade` overrides the player's bus volume
+
+> **Not fixed — still the owner's call, but no longer undocumented (2026-07-16).** `Engine.fsi` now
+> warns on `crossFade` that `toBus` ramps to unity rather than to its configured gain, so a cross-fade
+> onto a bus the player turned down puts it back to full and leaves it there. Changing the behaviour
+> would alter a working mix on a documented contract, which is a product decision rather than a
+> reviewer's; naming it in the signature is the part that could be done without making that call.
+
 
 **`src/FS.GG.Audio.Engine/Engine.fs:136`** — `EndG` is hard-coded to unity rather than the target
 bus's current base gain, so cross-fading *onto* a bus ramps it to full regardless of the player's
@@ -778,7 +805,7 @@ The existing `Engine.step` fuzz result (§2) shows the approach works: `step` is
 | 4 | ~~Check `al.GetError()` inside `guarded`~~ **DONE 2026-07-16** (§3.4). Querying `ALC_MONO_SOURCES` instead of the hard-coded 240 remains open. | HIGH | ~~~2 h~~ |
 | 5 | **Fill the device lane the gate already built** — real resolver + `sampleWav()`, driving `Play`/`PlayAt`/`PlayMusic`/`SetBusGain`/`Dispose`. **STARTED 2026-07-16**: §3.4's fix added the first real assertion (a device error code is named), which proved the lane works end-to-end. The rest of the device path is still type-tested only. | HIGH | ~1.5 h |
 | 6 | ~~Fix the pan law to `dx / distance`. Add an off-axis-but-ahead test.~~ **DONE 2026-07-16** (§3.5). Also fixed a `nan` `Pan` found in the process, and corrected §2's overstated fuzz claim. | MED-HIGH | ~~~1 h~~ |
-| 7 | Treat non-finite `seconds` as immediate in `fadeBus`/`crossFade`; make `applyCurve`'s clamp NaN-total. | MED | ~30 min |
+| 7 | ~~Treat non-finite `seconds` as immediate in `fadeBus`/`crossFade`~~ **DONE 2026-07-16** (§3.6) — but **not as recommended**: folding `+infinity` in would silence the music instantly. `nan` only. | MED | ~~~30 min~~ |
 | 8 | ~~Add `THIRD-PARTY-NOTICES.md`, pack into Host/Elmish, fix `README.md:13` dep table.~~ **DONE 2026-07-16** (§3.9) — and into **Engine** too, which the finding missed. Gated both directions. Wording still wants a human/legal read. | MED (legal) | ~~~1 h~~ |
 | 9 | Document the single-thread contract on `Engine.T`, `IAudioBackend`, `Cmd.ofEngine`. | MED | ~30 min |
 | 10 | Reconsider `crossFade`'s `EndG = 1.0` overriding the target bus's volume. | MED (design) | discuss |
